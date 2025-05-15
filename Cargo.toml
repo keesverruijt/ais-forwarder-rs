@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 config = { version = "0.15.11", features = ["ini"] }
+directories = "6.0.0"
 env_logger = "0.11.8"
 log = "0.4.27"
 nmea-parser = "0.11.0"
+sled = "0.34.7"
+time = { version = "0.3.41", features = ["formatting", "macros"] }
 udp-stream = "0.0.12"
