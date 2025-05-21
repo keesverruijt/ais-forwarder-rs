@@ -1,0 +1,474 @@
+use config::Config;
+use env_logger::Env;
+use nmea_parser::ParsedMessage;
+use std::collections::HashMap;
+use std::io;
+use std::net::{TcpListener, UdpSocket};
+use std::process::exit;
+use std::sync::mpsc::Sender;
+use std::thread::Builder;
+use std::time::{Duration, Instant};
+
+use common::NetworkEndpoint;
+use common::Protocol;
+use common::buffer::BufReaderDirectWriter;
+use common::read_message_tcp;
+use common::read_message_udp;
+use common::send_message_tcp;
+use common::send_message_udp;
+
+mod cache;
+mod location;
+
+struct LastSent {
+    vessel_dynamic_data: Instant,
+    vessel_static_data: Instant,
+}
+
+struct Dispatcher {
+    provider: NetworkEndpoint,
+    ais: HashMap<String, NetworkEndpoint>,
+    location_tx: Sender<ParsedMessage>,
+    interval: u64,
+    location_interval: u64,
+    location_anchor_interval: u64,
+    nmea_parser: nmea_parser::NmeaParser,
+    last_sent: HashMap<u32, LastSent>,
+    last_sent_location: Instant,
+}
+
+fn main() {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
+    log::info!("ais-forwarder starting up");
+
+    let project_dirs = cache::get_project_dirs();
+    let mut db_path = project_dirs.config_dir().to_owned();
+    std::fs::create_dir_all(&db_path).expect("Cannot create config directory");
+    db_path.push("config.ini");
+    let db_path = db_path
+        .to_str()
+        .expect("Cannot convert config path to string");
+    log::info!("Loading config from {}", db_path);
+
+    let settings = match Config::builder()
+        .add_source(config::File::with_name(db_path))
+        .build()
+    {
+        Ok(config) => config,
+        Err(e) => {
+            log::error!("Error loading {}: {}", db_path, e);
+            exit(1);
+        }
+    };
+
+    let settings = match settings.try_deserialize::<HashMap<String, HashMap<String, String>>>() {
+        Ok(config) => config,
+        Err(e) => {
+            log::error!("Invalid format in {}: {}", db_path, e);
+            exit(1);
+        }
+    };
+    log::info!("Settings: {:?}", settings);
+
+    let general = match settings.get("general") {
+        Some(internal) => internal,
+        None => {
+            log::error!("Missing [internal] section in config.ini");
+            exit(1);
+        }
+    };
+    let mmsi = match general.get("mmsi").map(|v| v.parse::<u32>()) {
+        None => {
+            log::error!("Missing MMSI in config.ini");
+            exit(1);
+        }
+        Some(Ok(interval)) => interval,
+        Some(Err(e)) => {
+            log::error!("Invalid MMSI in config.ini: {}", e);
+            exit(1);
+        }
+    };
+    let interval = match general.get("interval").map(|v| v.parse::<u64>()) {
+        None => 60,
+        Some(Ok(interval)) => interval,
+        Some(Err(e)) => {
+            log::error!("Invalid interval in config.ini: {}", e);
+            exit(1);
+        }
+    };
+    let location_interval = match general.get("location_interval").map(|v| v.parse::<u64>()) {
+        None => 600,
+        Some(Ok(interval)) => interval,
+        Some(Err(e)) => {
+            log::error!("Invalid location_interval in config.ini: {}", e);
+            exit(1);
+        }
+    };
+    let location_anchor_interval = match general
+        .get("location_anchor_interval")
+        .map(|v| v.parse::<u64>())
+    {
+        None => 86400,
+        Some(Ok(interval)) => interval,
+        Some(Err(e)) => {
+            log::error!("Invalid location_anchor_interval in config.ini: {}", e);
+            exit(1);
+        }
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel::<ParsedMessage>();
+    let location = match settings.get("location") {
+        Some(location) => location,
+        None => {
+            log::error!("Missing [location] section in config.ini");
+            exit(1);
+        }
+    }
+    .into_iter()
+    .map(|(key, value)| {
+        let address = value
+            .parse::<NetworkEndpoint>()
+            .map_err(|e| {
+                log::error!("Invalid address '{}' in config.ini: {}", value, e);
+                exit(1);
+            })
+            .unwrap();
+        (key.clone(), address)
+    })
+    .collect();
+    Builder::new()
+        .name("location".to_string())
+        .spawn(move || {
+            location::work_thread(rx, location, mmsi);
+        })
+        .unwrap();
+
+    loop {
+        let provider = match general
+            .get("provider")
+            .map(|v| v.parse::<NetworkEndpoint>())
+        {
+            None => {
+                log::error!("Missing provider in config.ini");
+                exit(1);
+            }
+            Some(Ok(provider)) => provider,
+            Some(Err(e)) => {
+                log::error!("Invalid interval in config.ini: {}", e);
+                exit(1);
+            }
+        };
+
+        let ais = match settings.get("ais") {
+            Some(ais) => ais,
+            None => {
+                log::error!("Missing [ais] section in config.ini");
+                exit(1);
+            }
+        };
+        let ais = ais
+            .into_iter()
+            .map(|(key, value)| {
+                let address = value
+                    .parse::<NetworkEndpoint>()
+                    .map_err(|e| {
+                        log::error!("Invalid address '{}' in config.ini: {}", value, e);
+                        exit(1);
+                    })
+                    .unwrap();
+                (key.clone(), address)
+            })
+            .collect();
+
+        let mut dispatcher = Dispatcher::new(
+            provider,
+            ais,
+            tx.clone(),
+            interval,
+            location_interval,
+            location_anchor_interval,
+        );
+        if let Err(e) = dispatcher.work() {
+            log::error!("{}", e);
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+impl Dispatcher {
+    fn new(
+        provider: NetworkEndpoint,
+        ais: HashMap<String, NetworkEndpoint>,
+        location_tx: Sender<ParsedMessage>,
+        interval: u64,
+        location_interval: u64,
+        location_anchor_interval: u64,
+    ) -> Self {
+        Dispatcher {
+            provider,
+            ais,
+            location_tx,
+            interval,
+            location_interval,
+            location_anchor_interval,
+            nmea_parser: nmea_parser::NmeaParser::new(),
+            last_sent: HashMap::new(),
+            last_sent_location: Instant::now() - Duration::from_secs(location_interval),
+        }
+    }
+
+    fn work(&mut self) -> io::Result<()> {
+        let mut fragments = Vec::new();
+        let mut allow_ais_for_location = true;
+
+        let mut prev_lat = 0.0;
+        let mut prev_long = 0.0;
+
+        loop {
+            log::trace!("Waiting for message from provider");
+            let message = read_from_provider(&mut self.provider)?;
+            log::trace!("Received message: {}", message);
+
+            for line in message.lines() {
+                log::trace!("Received line: {}", line);
+                match self.nmea_parser.parse_sentence(line) {
+                    Ok(parsed_message) => {
+                        if parsed_message == ParsedMessage::Incomplete {
+                            fragments.push(line.to_string());
+                            continue;
+                        }
+                        log::debug!("Parsed message: {:?}", parsed_message);
+                        if let (Some(own_vessel), lat, long) = match &parsed_message {
+                            ParsedMessage::VesselDynamicData(data) => (
+                                Some(allow_ais_for_location && data.own_vessel),
+                                data.latitude,
+                                data.longitude,
+                            ),
+                            ParsedMessage::VesselStaticData(_data) => (Some(false), None, None),
+                            ParsedMessage::Rmc(data) => {
+                                allow_ais_for_location = false;
+                                (Some(true), data.latitude, data.longitude)
+                            }
+                            _ => (None, None, None),
+                        } {
+                            fragments.push(line.to_string());
+                            if self.check_last_sent(&parsed_message) {
+                                self.broadcast_ais(&parsed_message, fragments.join("").as_bytes())?;
+                            }
+                            if own_vessel {
+                                let now = Instant::now();
+                                let elapsed = now.duration_since(self.last_sent_location).as_secs();
+                                log::trace!(
+                                    "Compare last sent location: {:?} interval {} anchor {}",
+                                    elapsed,
+                                    self.location_interval,
+                                    self.location_anchor_interval,
+                                );
+                                if elapsed >= self.location_interval
+                                    && (is_moving(lat, long, prev_lat, prev_long)
+                                        && elapsed >= self.location_anchor_interval)
+                                {
+                                    prev_lat = lat.unwrap_or(0.0);
+                                    prev_long = long.unwrap_or(0.0);
+                                    self.last_sent_location = now;
+                                    self.location_tx.send(parsed_message).unwrap();
+                                }
+                            }
+                            fragments.clear();
+                        }
+                    }
+                    Err(_e) => {
+                        fragments.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    fn broadcast_ais(&mut self, message: &ParsedMessage, nmea_message: &[u8]) -> io::Result<()> {
+        log::debug!("Broadcasting message: {:?} / {:?}", message, nmea_message);
+        for (key, address) in self.ais.iter_mut() {
+            send_message(&nmea_message, key, address)?;
+        }
+        Ok(())
+    }
+
+    fn check_last_sent(&mut self, message: &ParsedMessage) -> bool {
+        match message {
+            ParsedMessage::VesselDynamicData(data) => {
+                let interval = if data.own_vessel {
+                    self.location_interval
+                } else {
+                    self.interval
+                };
+                let now = Instant::now();
+                let elapsed = now - Duration::from_secs(interval);
+                let last_sent = self.last_sent.entry(data.mmsi).or_insert(LastSent {
+                    vessel_dynamic_data: elapsed,
+                    vessel_static_data: elapsed,
+                });
+                if now.duration_since(last_sent.vessel_dynamic_data).as_secs() >= interval {
+                    last_sent.vessel_dynamic_data = now;
+                    return true;
+                }
+            }
+            ParsedMessage::VesselStaticData(data) => {
+                let interval = if data.own_vessel {
+                    self.location_interval
+                } else {
+                    self.interval
+                };
+                let now = Instant::now();
+                let elapsed = now - Duration::from_secs(interval);
+                let last_sent = self.last_sent.entry(data.mmsi).or_insert(LastSent {
+                    vessel_dynamic_data: elapsed,
+                    vessel_static_data: elapsed,
+                });
+                if now.duration_since(last_sent.vessel_static_data).as_secs() >= interval {
+                    last_sent.vessel_static_data = now;
+                    return true;
+                }
+            }
+            _ => {
+                log::debug!("Ignoring message: {:?}", message);
+            }
+        }
+        return false;
+    }
+}
+
+fn is_moving(lat: Option<f64>, long: Option<f64>, prev_lat: f64, prev_long: f64) -> bool {
+    if let (Some(lat), Some(long)) = (lat, long) {
+        let lat_diff = (lat - prev_lat).abs();
+        let long_diff = (long - prev_long).abs();
+        if lat_diff > 0.001 || long_diff > 0.001 {
+            return true;
+        }
+    }
+    false
+}
+
+fn send_message(
+    nmea_message: &[u8],
+    key: &String,
+    address: &mut NetworkEndpoint,
+) -> io::Result<()> {
+    match address.protocol {
+        Protocol::TCP => {
+            if address.tcp_stream.len() == 0 {
+                let stream = std::net::TcpStream::connect(address.addr).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("{} ({}): {}", key, address.addr, e),
+                    )
+                })?;
+                log::info!("{}: Connected to {}", key, address);
+                let reader = BufReaderDirectWriter::new(stream);
+                address.tcp_stream.push(reader);
+            }
+            if let Some(tcp_stream) = address.tcp_stream.get_mut(0) {
+                send_message_tcp(tcp_stream, nmea_message).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("send_message tcp {} ({}): {}", key, address.addr, e),
+                    )
+                })?;
+            }
+        }
+        Protocol::UDP => {
+            if address.udp_socket.is_none() {
+                let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("{} ({}): {}", key, address.addr, e),
+                    )
+                })?;
+                UdpSocket::connect(&socket, address.addr)?;
+                log::info!("{}: Connected to {}", key, address);
+                address.udp_socket = Some(socket);
+            }
+            if let Some(udp_socket) = address.udp_socket.as_mut() {
+                send_message_udp(udp_socket, nmea_message).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("send_message udp {} ({}): {}", key, address.addr, e),
+                    )
+                })?;
+            }
+        }
+        Protocol::TCPListen | Protocol::UDPListen => {}
+    }
+    Ok(())
+}
+
+fn read_from_provider(provider: &mut NetworkEndpoint) -> io::Result<String> {
+    match provider.protocol {
+        Protocol::TCP => {
+            if provider.tcp_stream.len() == 0 {
+                let stream = std::net::TcpStream::connect(provider.addr).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        format!("provider {}: {}", provider.addr, e),
+                    )
+                })?;
+                log::info!("Connected to provider: {}", provider);
+                let reader = BufReaderDirectWriter::new(stream);
+                provider.tcp_stream.push(reader);
+            }
+            return read_message_tcp(&mut provider.tcp_stream[0]);
+        }
+        Protocol::TCPListen => {
+            if provider.tcp_listener.is_none() {
+                let listener = TcpListener::bind(provider.addr).map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        format!("provider {}: {}", provider.addr, e),
+                    )
+                })?;
+                listener.set_nonblocking(true)?;
+                log::info!("Listening on: {}", provider);
+                provider.tcp_listener = Some(listener);
+            }
+            if let Some(tcp_listener) = provider.tcp_listener.as_mut() {
+                loop {
+                    match tcp_listener.accept() {
+                        Ok((stream, addr)) => {
+                            log::info!("Accepted connection from: {}", addr);
+                            stream.set_nonblocking(true)?;
+                            let reader = BufReaderDirectWriter::new(stream);
+                            provider.tcp_stream.push(reader);
+                        }
+                        Err(e) => {
+                            if e.kind() == io::ErrorKind::WouldBlock {
+                                // No connection available, continue
+                                break;
+                            }
+                            log::error!("Error accepting connection: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+            }
+            for reader in provider.tcp_stream.iter_mut() {
+                if let Ok(message) = read_message_tcp(reader) {
+                    return Ok(message);
+                }
+            }
+        }
+        Protocol::UDP | Protocol::UDPListen => {
+            if provider.udp_socket.is_none() {
+                let socket = std::net::UdpSocket::bind(provider.addr)?;
+                log::info!("Listening on: {}", provider);
+                provider.udp_socket = Some(socket);
+            }
+            if let Some(udp_socket) = provider.udp_socket.as_mut() {
+                return read_message_udp(udp_socket);
+            }
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Other,
+        "Failed to read from provider",
+    ))
+}
