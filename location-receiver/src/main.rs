@@ -1,8 +1,10 @@
+use ::time::OffsetDateTime;
 use env_logger::Env;
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::thread;
+use std::time::SystemTime;
 
 use common::buffer::BufReaderDirectWriter;
 
@@ -49,9 +51,12 @@ fn process_message(message: &str, db_path: &Path) {
         return;
     }
     let (id, message) = message.split_at(i);
-    let nmea_message = &message[3..6].to_lowercase();
+    let nmea_id = &message[3..6].to_lowercase();
+    let message = format!("{}\r\n", message);
+    let now: OffsetDateTime = SystemTime::now().into();
+    let year = now.year();
 
-    let path = db_path.join(format!("{}_{}.nmea", id, nmea_message));
+    let path = db_path.join(format!("{}_{}_{}.db", id, year, nmea_id));
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

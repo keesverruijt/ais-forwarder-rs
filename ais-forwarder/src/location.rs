@@ -12,8 +12,9 @@ pub fn work_thread(
     rx: std::sync::mpsc::Receiver<ParsedMessage>,
     location: HashMap<String, NetworkEndpoint>,
     mmsi: u32,
+    cache_dir: &str,
 ) {
-    let persistence = Persistence::new();
+    let persistence = Persistence::new(cache_dir);
 
     let _ = Location::new(location, persistence, mmsi).location_loop(&rx);
 }

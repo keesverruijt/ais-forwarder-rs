@@ -1,13 +1,15 @@
+use clap::Parser;
 use config::Config;
 use env_logger::Env;
 use nmea_parser::ParsedMessage;
 use std::collections::HashMap;
-use std::io;
 use std::net::{TcpListener, UdpSocket};
+use std::path::PathBuf;
 use std::process::exit;
 use std::sync::mpsc::Sender;
 use std::thread::Builder;
 use std::time::{Duration, Instant};
+use std::{io, path};
 
 use common::NetworkEndpoint;
 use common::Protocol;
@@ -37,27 +39,52 @@ struct Dispatcher {
     last_sent_location: Instant,
 }
 
+#[derive(Parser, Clone, Debug)]
+pub struct Cli {
+    #[clap(flatten)]
+    pub verbose: clap_verbosity_flag::Verbosity<clap_verbosity_flag::InfoLevel>,
+
+    /// Configuration file (supports .ini, .toml, .json, .yaml) --
+    /// If the file is relative, it will be searched in /etc/ais-forwarder or /usr/local/etc/ais-forwarder.
+    /// If the file is absolute, it will be used as is.
+    #[clap(long, default_value = "config")]
+    pub config: String,
+
+    /// Cache directory --
+    /// This must be a directory that is writable by the user running the program.
+    /// If the directory does not exist, it will be created.
+    #[clap(long, default_value = "/usr/local/var/cache/ais-forwarder")]
+    pub cache_dir: String,
+}
+
 fn main() {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    let cli = Cli::parse();
+    let log_level = cli.verbose.log_level_filter();
+    let mut logger = env_logger::Builder::from_env(Env::default());
+    logger.filter_level(log_level);
+    // When running as a procd daemon, the PWD environment variable is not set
+    // which can be used to shorten the logging records that already contain the timestamp.
+    if std::env::var("PWD").is_err() {
+        logger.format_timestamp(None);
+    }
+    logger.init();
 
-    log::info!("ais-forwarder starting up");
-
-    let project_dirs = cache::get_project_dirs();
-    let mut db_path = project_dirs.config_dir().to_owned();
-    std::fs::create_dir_all(&db_path).expect("Cannot create config directory");
-    db_path.push("config.ini");
-    let db_path = db_path
+    let mut config_path = PathBuf::from(cli.config);
+    if config_path.is_relative() {
+        config_path = get_config_dir().join(config_path);
+    }
+    let config_path = config_path
         .to_str()
         .expect("Cannot convert config path to string");
-    log::info!("Loading config from {}", db_path);
+    log::info!("Loading config from {}", config_path);
 
     let settings = match Config::builder()
-        .add_source(config::File::with_name(db_path))
+        .add_source(config::File::with_name(config_path))
         .build()
     {
         Ok(config) => config,
         Err(e) => {
-            log::error!("Error loading {}: {}", db_path, e);
+            log::error!("Error loading {}: {}", config_path, e);
             exit(1);
         }
     };
@@ -65,7 +92,7 @@ fn main() {
     let settings = match settings.try_deserialize::<HashMap<String, HashMap<String, String>>>() {
         Ok(config) => config,
         Err(e) => {
-            log::error!("Invalid format in {}: {}", db_path, e);
+            log::error!("Invalid format in {}: {}", config_path, e);
             exit(1);
         }
     };
@@ -140,7 +167,7 @@ fn main() {
     Builder::new()
         .name("location".to_string())
         .spawn(move || {
-            location::work_thread(rx, location, mmsi);
+            location::work_thread(rx, location, mmsi, cli.cache_dir.as_str());
         })
         .unwrap();
 
@@ -374,6 +401,7 @@ fn send_message(
                         format!("send_message tcp {} ({}): {}", key, address.addr, e),
                     )
                 })?;
+                log::debug!("{}: Sent message to {}", key, address);
             }
         }
         Protocol::UDP => {
@@ -471,4 +499,19 @@ fn read_from_provider(provider: &mut NetworkEndpoint) -> io::Result<String> {
         io::ErrorKind::Other,
         "Failed to read from provider",
     ))
+}
+
+fn get_config_dir() -> PathBuf {
+    let path = if path::Path::new("/etc/ais-forwarder").exists() {
+        "/etc/ais-forwarder"
+    } else if path::Path::new("/usr/local/etc/ais-forwarder").exists() {
+        "/usr/local/etc/ais-forwarder"
+    } else {
+        log::error!(
+            "No /etc/ais-forwarder or /usr/local/etc/ais-forwarder config directory found and no config file argument provided"
+        );
+        exit(1);
+    };
+    let path = path::Path::new(path);
+    path.to_path_buf()
 }

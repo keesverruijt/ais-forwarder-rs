@@ -7,3 +7,4 @@ edition = "2024"
 env_logger = "0.11.8"
 log = "0.4.27"
 common = { path = "../common" }
+time = { version = "0.3.41", features = ["macros", "formatting"] }

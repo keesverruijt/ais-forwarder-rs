@@ -1,11 +1,6 @@
-use directories::ProjectDirs;
-use sled::*;
-use std::fs;
+use std::path::PathBuf;
 
-pub fn get_project_dirs() -> ProjectDirs {
-    directories::ProjectDirs::from("net", "verruijt", "ais-forwarder")
-        .expect("Cannot find project directories")
-}
+use sled::*;
 
 #[derive(Debug, Clone)]
 pub struct Persistence {
@@ -15,22 +10,22 @@ pub struct Persistence {
 
 #[allow(dead_code)]
 impl Persistence {
-    pub fn new() -> Self {
-        let project_dirs = get_project_dirs();
-        let mut db_path = project_dirs.cache_dir().to_owned();
-        fs::create_dir_all(&db_path).expect("Cannot create cache directory");
-        db_path.push("location.db");
+    pub fn new(cache_dir: &str) -> Self {
+        let database_path = PathBuf::from(cache_dir);
+        if !database_path.exists() {
+            std::fs::create_dir_all(&database_path).expect("Cannot create database directory");
+        }
 
         let db: Db = sled::Config::default()
             .cache_capacity(500_000)
-            .path(&db_path)
+            .path(&database_path)
             .open()
-            .expect(format!("Cannot open database {}", db_path.display()).as_str());
+            .expect(format!("Cannot open database {}", database_path.display()).as_str());
         let count = db.len();
 
         let this = Persistence { db, count };
 
-        log::debug!("database loaded from {:?}", db_path);
+        log::debug!("database loaded from {}", database_path.display());
 
         this
     }
