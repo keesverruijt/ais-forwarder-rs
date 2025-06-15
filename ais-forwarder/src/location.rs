@@ -41,6 +41,10 @@ impl Location {
     fn location_loop(&mut self, rx: &Receiver<ParsedMessage>) -> io::Result<()> {
         const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
+        log::info!(
+            "Starting location loop with {} endpoints",
+            self.location.len()
+        );
         // Keep track of whether we are able to send messages to the server
         let mut connection_ok = self.resend_messages().is_ok();
 
@@ -71,9 +75,12 @@ impl Location {
     }
 
     fn resend_messages(&mut self) -> io::Result<()> {
-        if self.persistence.count() == 0 {
+        let resend_count = self.persistence.count();
+        if resend_count == 0 {
+            log::debug!("No messages to resend from persistence");
             return Ok(());
         }
+        log::info!("Resending {} messages from persistence", resend_count);
         for item in self.persistence.iter() {
             match item {
                 Ok((key, value)) => {
@@ -104,7 +111,7 @@ impl Location {
         let nmea_message = match message {
             ParsedMessage::VesselDynamicData(message) => {
                 format!(
-                    "{}$GNRMC,{},A,{},{},{},{},{},,,A",
+                    "{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",
                     message.mmsi,
                     now.format(TIME_FORMAT),
                     Self::format_lat_long(message.latitude, true),
@@ -117,7 +124,7 @@ impl Location {
             ParsedMessage::Rmc(message) => {
                 let ts = message.timestamp.unwrap_or(now);
                 format!(
-                    "{}$GNRMC,{},A,{},{},{},{},{},,,A",
+                    "{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",
                     self.mmsi,
                     ts.format(TIME_FORMAT),
                     Self::format_lat_long(message.latitude, true),

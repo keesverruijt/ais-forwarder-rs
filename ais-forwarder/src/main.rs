@@ -294,7 +294,7 @@ impl Dispatcher {
                                 );
                                 if elapsed >= self.location_interval
                                     && (is_moving(lat, long, prev_lat, prev_long)
-                                        && elapsed >= self.location_anchor_interval)
+                                        || elapsed >= self.location_anchor_interval)
                                 {
                                     prev_lat = lat.unwrap_or(0.0);
                                     prev_long = long.unwrap_or(0.0);

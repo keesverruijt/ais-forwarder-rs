@@ -30,7 +30,11 @@ fn main() {
                     Ok(_) => {
                         log::info!("Received message: {}", buffer);
                         // Process the message here
-                        process_message(&buffer, db_path);
+                        for line in buffer.lines() {
+                            if !line.is_empty() {
+                                process_message(line, &db_path);
+                            }
+                        }
                         buffer.clear();
                     }
                     Err(e) => {
