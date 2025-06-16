@@ -39,7 +39,7 @@ impl Location {
     }
 
     fn location_loop(&mut self, rx: &Receiver<ParsedMessage>) -> io::Result<()> {
-        const MESSAGE_TIMEOUT: Duration = Duration::from_secs(60);
+        const MESSAGE_TIMEOUT: Duration = Duration::from_secs(360);
 
         log::info!(
             "Starting location loop with {} endpoints",
@@ -47,19 +47,31 @@ impl Location {
         );
         // Keep track of whether we are able to send messages to the server
         let mut connection_ok = self.resend_messages().is_ok();
+        let mut first = true;
 
         loop {
             match rx.recv_timeout(MESSAGE_TIMEOUT) {
                 Ok(message) => {
                     log::debug!("Received message: {:?}", message);
                     if !connection_ok {
+                        first = true;
                         connection_ok = self.resend_messages().is_ok();
                     }
                     connection_ok = self.parse_message(&message, connection_ok).is_ok();
+                    if first {
+                        log::info!(
+                            "Location thread sent first message, connection ok: {}",
+                            connection_ok
+                        );
+                        first = false;
+                    }
                 }
                 Err(e) => match e {
                     std::sync::mpsc::RecvTimeoutError::Timeout => {
                         connection_ok = self.resend_messages().is_ok();
+                        if !connection_ok {
+                            first = true;
+                        }
                         continue;
                     }
                     std::sync::mpsc::RecvTimeoutError::Disconnected => {
@@ -77,7 +89,7 @@ impl Location {
     fn resend_messages(&mut self) -> io::Result<()> {
         let resend_count = self.persistence.count();
         if resend_count == 0 {
-            log::debug!("No messages to resend from persistence");
+            log::info!("No messages to resend from persistence");
             return Ok(());
         }
         log::info!("Resending {} messages from persistence", resend_count);
