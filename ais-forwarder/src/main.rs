@@ -390,6 +390,14 @@ fn send_message(
                         format!("{} ({}): {}", key, address.addr, e),
                     )
                 })?;
+
+                // Set the stream to use keepalive
+                let sock_ref = socket2::SockRef::from(&stream);
+                let mut ka = socket2::TcpKeepalive::new();
+                ka = ka.with_time(Duration::from_secs(30));
+                ka = ka.with_interval(Duration::from_secs(30));
+                sock_ref.set_tcp_keepalive(&ka)?;
+
                 log::info!("{}: Connected to {}", key, address);
                 let reader = BufReaderDirectWriter::new(stream);
                 address.tcp_stream.push(reader);
