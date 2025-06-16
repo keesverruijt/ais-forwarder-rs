@@ -245,12 +245,33 @@ impl Dispatcher {
         }
     }
 
+    fn next_location_instant(&self, now: &Instant) -> Instant {
+        let elapsed = now.duration_since(self.last_sent_location).as_secs();
+        let wait_period = if elapsed < self.location_interval {
+            self.location_interval - elapsed
+        } else {
+            0
+        };
+        *now + Duration::from_secs(wait_period)
+    }
+    fn next_location_anchor_instant(&self, now: &Instant) -> Instant {
+        let elapsed = now.duration_since(self.last_sent_location).as_secs();
+        let wait_period = if elapsed < self.location_anchor_interval {
+            self.location_anchor_interval - elapsed
+        } else {
+            0
+        };
+        *now + Duration::from_secs(wait_period)
+    }
+
     fn work(&mut self) -> io::Result<()> {
         let mut fragments = Vec::new();
         let mut allow_ais_for_location = true;
-
         let mut prev_lat = 0.0;
         let mut prev_long = 0.0;
+        let now = Instant::now();
+        let mut next_location_instant = self.next_location_instant(&now);
+        let mut next_location_anchor_instant = self.next_location_anchor_instant(&now);
 
         loop {
             log::trace!("Waiting for message from provider");
@@ -285,21 +306,23 @@ impl Dispatcher {
                             }
                             if own_vessel {
                                 let now = Instant::now();
-                                let elapsed = now.duration_since(self.last_sent_location).as_secs();
                                 log::trace!(
-                                    "Compare last sent location: {:?} interval {} anchor {}",
-                                    elapsed,
-                                    self.location_interval,
-                                    self.location_anchor_interval,
+                                    "Compare last sent location: {:?} interval {:?} anchor {:?}",
+                                    now,
+                                    next_location_instant,
+                                    next_location_anchor_instant,
                                 );
-                                if elapsed >= self.location_interval
-                                    && (is_moving(lat, long, prev_lat, prev_long)
-                                        || elapsed >= self.location_anchor_interval)
+                                if now >= next_location_anchor_instant
+                                    || (now >= next_location_instant
+                                        && is_moving(lat, long, prev_lat, prev_long))
                                 {
                                     prev_lat = lat.unwrap_or(0.0);
                                     prev_long = long.unwrap_or(0.0);
                                     self.last_sent_location = now;
                                     self.location_tx.send(parsed_message).unwrap();
+                                    next_location_instant = self.next_location_instant(&now);
+                                    next_location_anchor_instant =
+                                        self.next_location_anchor_instant(&now);
                                 }
                             }
                             fragments.clear();
