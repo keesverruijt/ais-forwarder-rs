@@ -4,11 +4,12 @@ use env_logger::Env;
 use nmea_parser::ParsedMessage;
 use std::collections::HashMap;
 use std::net::{TcpListener, UdpSocket};
+use std::ops::Add;
 use std::path::PathBuf;
 use std::process::exit;
 use std::sync::mpsc::Sender;
 use std::thread::Builder;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use std::{io, path};
 
 use common::NetworkEndpoint;
@@ -36,7 +37,7 @@ struct Dispatcher {
     location_anchor_interval: u64,
     nmea_parser: nmea_parser::NmeaParser,
     last_sent: HashMap<u32, LastSent>,
-    last_sent_location: Instant,
+    last_sent_location: SystemTime,
 }
 
 #[derive(Parser, Clone, Debug)]
@@ -241,27 +242,28 @@ impl Dispatcher {
             location_anchor_interval,
             nmea_parser: nmea_parser::NmeaParser::new(),
             last_sent: HashMap::new(),
-            last_sent_location: Instant::now() - Duration::from_secs(location_interval),
+            last_sent_location: SystemTime::now() - Duration::from_secs(location_interval),
         }
     }
 
-    fn next_location_instant(&self, now: &Instant) -> Instant {
-        let elapsed = now.duration_since(self.last_sent_location).as_secs();
-        let wait_period = if elapsed < self.location_interval {
-            self.location_interval - elapsed
-        } else {
-            0
-        };
-        *now + Duration::from_secs(wait_period)
+    fn next_location_system_time(&self, now: &SystemTime) -> SystemTime {
+        let next_instant = now.add(Duration::from_secs(self.location_interval));
+        let next_instant_secs = next_instant
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next_instant_secs = next_instant_secs - (next_instant_secs % self.location_interval);
+        SystemTime::UNIX_EPOCH + Duration::from_secs(next_instant_secs)
     }
-    fn next_location_anchor_instant(&self, now: &Instant) -> Instant {
-        let elapsed = now.duration_since(self.last_sent_location).as_secs();
-        let wait_period = if elapsed < self.location_anchor_interval {
-            self.location_anchor_interval - elapsed
-        } else {
-            0
-        };
-        *now + Duration::from_secs(wait_period)
+    fn next_location_anchor_system_time(&self, now: &SystemTime) -> SystemTime {
+        let next_instant = now.add(Duration::from_secs(self.location_anchor_interval));
+        let next_instant_secs = next_instant
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let next_instant_secs =
+            next_instant_secs - (next_instant_secs % self.location_anchor_interval);
+        SystemTime::UNIX_EPOCH + Duration::from_secs(next_instant_secs)
     }
 
     fn work(&mut self) -> io::Result<()> {
@@ -269,9 +271,9 @@ impl Dispatcher {
         let mut allow_ais_for_location = true;
         let mut prev_lat = 0.0;
         let mut prev_long = 0.0;
-        let now = Instant::now();
-        let mut next_location_instant = self.next_location_instant(&now);
-        let mut next_location_anchor_instant = self.next_location_anchor_instant(&now);
+        let now = SystemTime::now();
+        let mut next_location_ts = self.next_location_system_time(&now);
+        let mut next_location_anchor_ts = self.next_location_anchor_system_time(&now);
 
         loop {
             log::trace!("Waiting for message from provider");
@@ -305,24 +307,24 @@ impl Dispatcher {
                                 self.broadcast_ais(&parsed_message, fragments.join("").as_bytes())?;
                             }
                             if own_vessel {
-                                let now = Instant::now();
+                                let now = SystemTime::now();
                                 log::trace!(
                                     "Compare last sent location: {:?} interval {:?} anchor {:?}",
                                     now,
-                                    next_location_instant,
-                                    next_location_anchor_instant,
+                                    next_location_ts,
+                                    next_location_anchor_ts,
                                 );
-                                if now >= next_location_anchor_instant
-                                    || (now >= next_location_instant
+                                if now >= next_location_anchor_ts
+                                    || (now >= next_location_ts
                                         && is_moving(lat, long, prev_lat, prev_long))
                                 {
                                     prev_lat = lat.unwrap_or(0.0);
                                     prev_long = long.unwrap_or(0.0);
                                     self.last_sent_location = now;
                                     self.location_tx.send(parsed_message).unwrap();
-                                    next_location_instant = self.next_location_instant(&now);
-                                    next_location_anchor_instant =
-                                        self.next_location_anchor_instant(&now);
+                                    next_location_ts = self.next_location_system_time(&now);
+                                    next_location_anchor_ts =
+                                        self.next_location_anchor_system_time(&now);
                                 }
                             }
                             fragments.clear();
@@ -347,35 +349,25 @@ impl Dispatcher {
     fn check_last_sent(&mut self, message: &ParsedMessage) -> bool {
         match message {
             ParsedMessage::VesselDynamicData(data) => {
-                let interval = if data.own_vessel {
-                    self.location_interval
-                } else {
-                    self.interval
-                };
                 let now = Instant::now();
-                let elapsed = now - Duration::from_secs(interval);
+                let elapsed = now - Duration::from_secs(self.interval);
                 let last_sent = self.last_sent.entry(data.mmsi).or_insert(LastSent {
                     vessel_dynamic_data: elapsed,
                     vessel_static_data: elapsed,
                 });
-                if now.duration_since(last_sent.vessel_dynamic_data).as_secs() >= interval {
+                if now.duration_since(last_sent.vessel_dynamic_data).as_secs() >= self.interval {
                     last_sent.vessel_dynamic_data = now;
                     return true;
                 }
             }
             ParsedMessage::VesselStaticData(data) => {
-                let interval = if data.own_vessel {
-                    self.location_interval
-                } else {
-                    self.interval
-                };
                 let now = Instant::now();
-                let elapsed = now - Duration::from_secs(interval);
+                let elapsed = now - Duration::from_secs(self.interval);
                 let last_sent = self.last_sent.entry(data.mmsi).or_insert(LastSent {
                     vessel_dynamic_data: elapsed,
                     vessel_static_data: elapsed,
                 });
-                if now.duration_since(last_sent.vessel_static_data).as_secs() >= interval {
+                if now.duration_since(last_sent.vessel_static_data).as_secs() >= self.interval {
                     last_sent.vessel_static_data = now;
                     return true;
                 }
