@@ -406,6 +406,15 @@ fn send_message(
 ) -> io::Result<()> {
     match address.protocol {
         Protocol::TCP => {
+            address.tcp_stream.retain(|writer| {
+                if writer.peer_addr().is_err() {
+                    log::warn!("Removing disconnected TCP stream");
+                    false
+                } else {
+                    true
+                }
+            });
+
             if address.tcp_stream.len() == 0 {
                 let stream = std::net::TcpStream::connect(address.addr).map_err(|e| {
                     std::io::Error::new(
@@ -422,11 +431,12 @@ fn send_message(
                 sock_ref.set_tcp_keepalive(&ka)?;
 
                 log::info!("{}: Connected to {}", key, address);
-                let reader = BufReaderDirectWriter::new(stream);
-                address.tcp_stream.push(reader);
+                let writer = BufReaderDirectWriter::new(stream);
+                address.tcp_stream.push(writer);
             }
             if let Some(tcp_stream) = address.tcp_stream.get_mut(0) {
                 send_message_tcp(tcp_stream, nmea_message).map_err(|e| {
+                    address.tcp_stream.clear();
                     std::io::Error::new(
                         std::io::ErrorKind::ConnectionRefused,
                         format!("send_message tcp {} ({}): {}", key, address.addr, e),
@@ -464,6 +474,15 @@ fn send_message(
 fn read_from_provider(provider: &mut NetworkEndpoint) -> io::Result<String> {
     match provider.protocol {
         Protocol::TCP => {
+            provider.tcp_stream.retain(|reader| {
+                if reader.peer_addr().is_err() {
+                    log::warn!("Removing disconnected TCP stream");
+                    false
+                } else {
+                    true
+                }
+            });
+
             if provider.tcp_stream.len() == 0 {
                 let stream = std::net::TcpStream::connect(provider.addr).map_err(|e| {
                     std::io::Error::new(
@@ -509,9 +528,21 @@ fn read_from_provider(provider: &mut NetworkEndpoint) -> io::Result<String> {
                     }
                 }
             }
+
+            provider.tcp_stream.retain(|reader| {
+                if reader.peer_addr().is_err() {
+                    log::warn!("Removing disconnected TCP stream");
+                    false
+                } else {
+                    true
+                }
+            });
+
             for reader in provider.tcp_stream.iter_mut() {
                 if let Ok(message) = read_message_tcp(reader) {
-                    return Ok(message);
+                    if message.len() > 0 {
+                        return Ok(message);
+                    }
                 }
             }
         }

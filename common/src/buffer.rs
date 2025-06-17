@@ -6,6 +6,7 @@ use std::io::IoSliceMut;
 use std::io::Read;
 use std::io::Result;
 use std::io::Write;
+use std::ops::Deref;
 
 pub struct BufReaderDirectWriter<T: ?Sized> {
     pub(crate) inner: BufReader<T>,
@@ -66,6 +67,13 @@ impl<T: Write + ?Sized> Write for BufReaderDirectWriter<T> {
 
     fn flush(&mut self) -> Result<()> {
         self.inner.get_mut().flush()
+    }
+}
+
+impl<T> Deref for BufReaderDirectWriter<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.inner.get_ref()
     }
 }
 
