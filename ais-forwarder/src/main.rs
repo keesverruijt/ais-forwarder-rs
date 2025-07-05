@@ -2,6 +2,7 @@ use clap::Parser;
 use config::Config;
 use env_logger::Env;
 use nmea_parser::ParsedMessage;
+use std::alloc::System;
 use std::collections::HashMap;
 use std::net::{TcpListener, UdpSocket};
 use std::ops::Add;
@@ -250,7 +251,7 @@ impl Dispatcher {
         let next_instant = now.add(Duration::from_secs(self.location_interval));
         let next_instant_secs = next_instant
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap() // Since this is now plus the interval, this should always be valid
             .as_secs();
         let next_instant_secs = next_instant_secs - (next_instant_secs % self.location_interval);
         SystemTime::UNIX_EPOCH + Duration::from_secs(next_instant_secs)
@@ -259,16 +260,24 @@ impl Dispatcher {
         let next_instant = now.add(Duration::from_secs(self.location_anchor_interval));
         let next_instant_secs = next_instant
             .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
+            .unwrap() // Since this is now plus the interval, this should always be valid
             .as_secs();
         let next_instant_secs =
             next_instant_secs - (next_instant_secs % self.location_anchor_interval);
         SystemTime::UNIX_EPOCH + Duration::from_secs(next_instant_secs)
     }
 
+    // Send AIS messages to the AIS endpoints and handle location updates.
+    // When a RMC message has been received recently, we will use that for the location update.
+    // Otherwise, we will use the last known location from the AIS messages.
+    // The location update will be sent to the location receiver thread.
+    // The location update will be sent every `location_interval` seconds when the vessel is
+    // moving or every `location_anchor_interval` seconds when the vessel is not moving.
     fn work(&mut self) -> io::Result<()> {
+        const RMC_MESSAGE_TIMEOUT: Duration = Duration::from_secs(30);
+
         let mut fragments = Vec::new();
-        let mut allow_ais_for_location = true;
+        let mut last_seen_rmc_message = SystemTime::UNIX_EPOCH;
         let mut prev_lat = 0.0;
         let mut prev_long = 0.0;
         let now = SystemTime::now();
@@ -289,42 +298,51 @@ impl Dispatcher {
                             continue;
                         }
                         log::debug!("Parsed message: {:?}", parsed_message);
+                        let now = SystemTime::now();
+
                         if let (Some(own_vessel), lat, long) = match &parsed_message {
                             ParsedMessage::VesselDynamicData(data) => (
-                                Some(allow_ais_for_location && data.own_vessel),
+                                Some(
+                                    last_seen_rmc_message + RMC_MESSAGE_TIMEOUT > now
+                                        && data.own_vessel,
+                                ),
                                 data.latitude,
                                 data.longitude,
                             ),
                             ParsedMessage::VesselStaticData(_data) => (Some(false), None, None),
                             ParsedMessage::Rmc(data) => {
-                                allow_ais_for_location = false;
+                                last_seen_rmc_message = now;
                                 (Some(true), data.latitude, data.longitude)
                             }
                             _ => (None, None, None),
                         } {
                             fragments.push(line.to_string());
-                            if self.check_last_sent(&parsed_message) {
-                                self.broadcast_ais(&parsed_message, fragments.join("").as_bytes())?;
-                            }
-                            if own_vessel {
-                                let now = SystemTime::now();
-                                log::trace!(
-                                    "Compare last sent location: {:?} interval {:?} anchor {:?}",
-                                    now,
-                                    next_location_ts,
-                                    next_location_anchor_ts,
-                                );
-                                if now >= next_location_anchor_ts
-                                    || (now >= next_location_ts
-                                        && is_moving(lat, long, prev_lat, prev_long))
-                                {
-                                    prev_lat = lat.unwrap_or(0.0);
-                                    prev_long = long.unwrap_or(0.0);
-                                    self.last_sent_location = now;
-                                    self.location_tx.send(parsed_message).unwrap();
-                                    next_location_ts = self.next_location_system_time(&now);
-                                    next_location_anchor_ts =
-                                        self.next_location_anchor_system_time(&now);
+                            if lat.is_some() && long.is_some() {
+                                if self.check_last_sent(&parsed_message) {
+                                    self.broadcast_ais(
+                                        &parsed_message,
+                                        fragments.join("").as_bytes(),
+                                    )?;
+                                }
+                                if own_vessel {
+                                    log::trace!(
+                                        "Compare last sent location: {:?} interval {:?} anchor {:?}",
+                                        now,
+                                        next_location_ts,
+                                        next_location_anchor_ts,
+                                    );
+                                    if now >= next_location_anchor_ts
+                                        || (now >= next_location_ts
+                                            && is_moving(lat, long, prev_lat, prev_long))
+                                    {
+                                        prev_lat = lat.unwrap_or(0.0);
+                                        prev_long = long.unwrap_or(0.0);
+                                        self.last_sent_location = now;
+                                        self.location_tx.send(parsed_message).unwrap();
+                                        next_location_ts = self.next_location_system_time(&now);
+                                        next_location_anchor_ts =
+                                            self.next_location_anchor_system_time(&now);
+                                    }
                                 }
                             }
                             fragments.clear();
