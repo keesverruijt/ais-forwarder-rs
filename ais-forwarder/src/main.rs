@@ -317,31 +317,35 @@ impl Dispatcher {
                             _ => (None, None, None),
                         } {
                             fragments.push(line.to_string());
-                            if lat.is_some() && long.is_some() {
-                                if self.check_last_sent(&parsed_message) {
-                                    self.broadcast_ais(
-                                        &parsed_message,
-                                        fragments.join("").as_bytes(),
-                                    )?;
-                                }
-                                if own_vessel {
-                                    log::trace!(
-                                        "Compare last sent location: {:?} interval {:?} anchor {:?}",
-                                        now,
-                                        next_location_ts,
-                                        next_location_anchor_ts,
-                                    );
-                                    if now >= next_location_anchor_ts
-                                        || (now >= next_location_ts
-                                            && is_moving(lat, long, prev_lat, prev_long))
-                                    {
-                                        prev_lat = lat.unwrap_or(0.0);
-                                        prev_long = long.unwrap_or(0.0);
-                                        self.last_sent_location = now;
-                                        self.location_tx.send(parsed_message).unwrap();
-                                        next_location_ts = self.next_location_system_time(&now);
-                                        next_location_anchor_ts =
-                                            self.next_location_anchor_system_time(&now);
+                            // Ignore messages with no position or at (0, 0) coordinates
+                            if let (Some(lat), Some(long)) = (lat, long) {
+                                log::trace!("Parsed position: lat: {}, long: {}", lat, long);
+                                if lat != 0.0 || long != 0.0 {
+                                    if self.check_last_sent(&parsed_message) {
+                                        self.broadcast_ais(
+                                            &parsed_message,
+                                            fragments.join("").as_bytes(),
+                                        )?;
+                                    }
+                                    if own_vessel {
+                                        log::trace!(
+                                            "Compare last sent location: {:?} interval {:?} anchor {:?}",
+                                            now,
+                                            next_location_ts,
+                                            next_location_anchor_ts,
+                                        );
+                                        if now >= next_location_anchor_ts
+                                            || (now >= next_location_ts
+                                                && is_moving(lat, long, prev_lat, prev_long))
+                                        {
+                                            prev_lat = lat;
+                                            prev_long = long;
+                                            self.last_sent_location = now;
+                                            self.location_tx.send(parsed_message).unwrap();
+                                            next_location_ts = self.next_location_system_time(&now);
+                                            next_location_anchor_ts =
+                                                self.next_location_anchor_system_time(&now);
+                                        }
                                     }
                                 }
                             }
@@ -398,15 +402,11 @@ impl Dispatcher {
     }
 }
 
-fn is_moving(lat: Option<f64>, long: Option<f64>, prev_lat: f64, prev_long: f64) -> bool {
-    if let (Some(lat), Some(long)) = (lat, long) {
-        let lat_diff = (lat - prev_lat).abs();
-        let long_diff = (long - prev_long).abs();
-        if lat_diff > 0.001 || long_diff > 0.001 {
-            return true;
-        }
-    }
-    false
+fn is_moving(lat: f64, long: f64, prev_lat: f64, prev_long: f64) -> bool {
+    let lat_diff = (lat - prev_lat).abs();
+    let long_diff = (long - prev_long).abs();
+
+    lat_diff > 0.001 || long_diff > 0.001
 }
 
 fn send_message(
