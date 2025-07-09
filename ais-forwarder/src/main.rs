@@ -377,10 +377,21 @@ impl Dispatcher {
                     vessel_dynamic_data: elapsed,
                     vessel_static_data: elapsed,
                 });
-                if now.duration_since(last_sent.vessel_dynamic_data).as_secs() >= self.interval {
+                let elapsed_secs = now.duration_since(last_sent.vessel_dynamic_data).as_secs();
+                if elapsed_secs >= self.interval {
                     last_sent.vessel_dynamic_data = now;
+                    log::debug!(
+                        "Sending dynamic data for MMSI {} as we last sent it {} seconds ago",
+                        data.mmsi,
+                        elapsed_secs
+                    );
                     return true;
                 }
+                log::debug!(
+                    "Skipping dynamic data for MMSI {} as we last sent it {} seconds ago",
+                    data.mmsi,
+                    elapsed_secs
+                );
             }
             ParsedMessage::VesselStaticData(data) => {
                 let now = Instant::now();
@@ -389,10 +400,21 @@ impl Dispatcher {
                     vessel_dynamic_data: elapsed,
                     vessel_static_data: elapsed,
                 });
-                if now.duration_since(last_sent.vessel_static_data).as_secs() >= self.interval {
+                let elapsed_secs = now.duration_since(last_sent.vessel_static_data).as_secs();
+                if elapsed_secs >= self.interval {
                     last_sent.vessel_static_data = now;
+                    log::debug!(
+                        "Sending static data for MMSI {} as we last sent it {} seconds ago",
+                        data.mmsi,
+                        elapsed_secs
+                    );
                     return true;
                 }
+                log::debug!(
+                    "Skipping static data for MMSI {} as we last sent it {} seconds ago",
+                    data.mmsi,
+                    elapsed_secs
+                );
             }
             _ => {
                 log::debug!("Ignoring message: {:?}", message);
