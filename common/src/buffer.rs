@@ -77,6 +77,12 @@ impl<T> Deref for BufReaderDirectWriter<T> {
     }
 }
 
+impl<T: PartialEq> PartialEq for BufReaderDirectWriter<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.get_ref() == other.inner.get_ref()
+    }
+}
+
 pub struct BufWriterDirectReader<T: ?Sized + Write> {
     pub(crate) inner: BufWriter<T>,
 }
@@ -137,5 +143,11 @@ impl<T: Write + BufRead + ?Sized> BufRead for BufWriterDirectReader<T> {
 
     fn consume(&mut self, amt: usize) {
         self.inner.get_mut().consume(amt)
+    }
+}
+
+impl<T: PartialEq + Write> PartialEq for BufWriterDirectReader<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.get_ref() == other.inner.get_ref()
     }
 }

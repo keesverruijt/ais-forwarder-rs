@@ -2,7 +2,6 @@ use clap::Parser;
 use config::Config;
 use env_logger::Env;
 use nmea_parser::ParsedMessage;
-use std::alloc::System;
 use std::collections::HashMap;
 use std::net::{TcpListener, UdpSocket};
 use std::ops::Add;
@@ -286,7 +285,7 @@ impl Dispatcher {
 
         loop {
             log::trace!("Waiting for message from provider");
-            let message = read_from_provider(&mut self.provider)?;
+            let message = self.provider.read_to_string()?;
             log::trace!("Received message: {}", message);
 
             for line in message.lines() {
@@ -501,98 +500,6 @@ fn send_message(
         Protocol::TCPListen | Protocol::UDPListen => {}
     }
     Ok(())
-}
-
-fn read_from_provider(provider: &mut NetworkEndpoint) -> io::Result<String> {
-    match provider.protocol {
-        Protocol::TCP => {
-            provider.tcp_stream.retain(|reader| {
-                if reader.peer_addr().is_err() {
-                    log::warn!("Removing disconnected TCP stream");
-                    false
-                } else {
-                    true
-                }
-            });
-
-            if provider.tcp_stream.len() == 0 {
-                let stream = std::net::TcpStream::connect(provider.addr).map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::ConnectionRefused,
-                        format!("provider {}: {}", provider.addr, e),
-                    )
-                })?;
-                log::info!("Connected to provider: {}", provider);
-                let reader = BufReaderDirectWriter::new(stream);
-                provider.tcp_stream.push(reader);
-            }
-            return read_message_tcp(&mut provider.tcp_stream[0]);
-        }
-        Protocol::TCPListen => {
-            if provider.tcp_listener.is_none() {
-                let listener = TcpListener::bind(provider.addr).map_err(|e| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::AddrInUse,
-                        format!("provider {}: {}", provider.addr, e),
-                    )
-                })?;
-                listener.set_nonblocking(true)?;
-                log::info!("Listening on: {}", provider);
-                provider.tcp_listener = Some(listener);
-            }
-            if let Some(tcp_listener) = provider.tcp_listener.as_mut() {
-                loop {
-                    match tcp_listener.accept() {
-                        Ok((stream, addr)) => {
-                            log::info!("Accepted connection from: {}", addr);
-                            stream.set_nonblocking(true)?;
-                            let reader = BufReaderDirectWriter::new(stream);
-                            provider.tcp_stream.push(reader);
-                        }
-                        Err(e) => {
-                            if e.kind() == io::ErrorKind::WouldBlock {
-                                // No connection available, continue
-                                break;
-                            }
-                            log::error!("Error accepting connection: {}", e);
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-
-            provider.tcp_stream.retain(|reader| {
-                if reader.peer_addr().is_err() {
-                    log::warn!("Removing disconnected TCP stream");
-                    false
-                } else {
-                    true
-                }
-            });
-
-            for reader in provider.tcp_stream.iter_mut() {
-                if let Ok(message) = read_message_tcp(reader) {
-                    if message.len() > 0 {
-                        return Ok(message);
-                    }
-                }
-            }
-        }
-        Protocol::UDP | Protocol::UDPListen => {
-            if provider.udp_socket.is_none() {
-                let socket = std::net::UdpSocket::bind(provider.addr)?;
-                log::info!("Listening on: {}", provider);
-                provider.udp_socket = Some(socket);
-            }
-            if let Some(udp_socket) = provider.udp_socket.as_mut() {
-                return read_message_udp(udp_socket);
-            }
-        }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::Other,
-        "Failed to read from provider",
-    ))
 }
 
 fn get_config_dir() -> PathBuf {

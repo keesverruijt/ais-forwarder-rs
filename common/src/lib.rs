@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 pub mod buffer;
 use buffer::BufReaderDirectWriter;
@@ -129,4 +130,128 @@ pub fn read_message_tcp(stream: &mut BufReaderDirectWriter<TcpStream>) -> io::Re
     let bytes_read = stream.read_line(&mut buffer)?;
     buffer.truncate(bytes_read);
     Ok(buffer)
+}
+
+impl NetworkEndpoint {
+    pub fn read_to_string(&mut self) -> io::Result<String> {
+        match self.protocol {
+            Protocol::TCP => {
+                if self.tcp_stream.len() == 0 {
+                    let stream = std::net::TcpStream::connect(self.addr).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::ConnectionRefused,
+                            format!("provider {}: {}", self.addr, e),
+                        )
+                    })?;
+                    log::info!("Connected to {}", self);
+                    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+                    let reader = BufReaderDirectWriter::new(stream);
+                    self.tcp_stream.push(reader);
+                }
+                match read_message_tcp(&mut self.tcp_stream[0]) {
+                    Ok(message) => {
+                        if message.len() > 0 {
+                            return Ok(message);
+                        }
+                        self.tcp_stream.clear();
+                        return Err(io::Error::new(
+                            io::ErrorKind::ConnectionReset,
+                            "TCP stream closed",
+                        ));
+                    }
+                    Err(e) => {
+                        log::error!("Error reading from TCP stream: {}", e);
+                        self.tcp_stream.clear();
+                        return Err(e);
+                    }
+                }
+            }
+            Protocol::TCPListen => {
+                if self.tcp_listener.is_none() {
+                    let listener = TcpListener::bind(self.addr).map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::AddrInUse,
+                            format!("provider {}: {}", self.addr, e),
+                        )
+                    })?;
+                    listener.set_nonblocking(true)?;
+                    log::info!("Listening on: {}", self);
+                    self.tcp_listener = Some(listener);
+                }
+                if let Some(tcp_listener) = self.tcp_listener.as_mut() {
+                    loop {
+                        match tcp_listener.accept() {
+                            Ok((stream, addr)) => {
+                                log::info!("Accepted connection from: {}", addr);
+                                stream.set_nonblocking(true)?;
+                                let reader = BufReaderDirectWriter::new(stream);
+                                self.tcp_stream.push(reader);
+                            }
+                            Err(e) => {
+                                if e.kind() == io::ErrorKind::WouldBlock {
+                                    // No connection available, continue
+                                    break;
+                                }
+                                log::error!("Error accepting connection: {}", e);
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+
+                self.tcp_stream.retain(|reader| {
+                    if reader.peer_addr().is_err() {
+                        log::warn!("Removing disconnected TCP stream");
+                        false
+                    } else {
+                        true
+                    }
+                });
+
+                let mut i = 0;
+                while i < self.tcp_stream.len() {
+                    match read_message_tcp(&mut self.tcp_stream[i]) {
+                        Ok(message) => {
+                            if message.len() > 0 {
+                                return Ok(message);
+                            }
+                            // Drop stream on empty read
+                            self.tcp_stream.remove(i);
+                            continue;
+                        }
+                        Err(e) => {
+                            match e.kind() {
+                                io::ErrorKind::WouldBlock => {
+                                    // No data available, continue
+                                }
+                                _ => {
+                                    log::error!("Error reading from TCP stream: {}", e);
+                                    self.tcp_stream.remove(i);
+                                    if self.tcp_stream.is_empty() {
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+
+            Protocol::UDP | Protocol::UDPListen => {
+                if self.udp_socket.is_none() {
+                    let socket = std::net::UdpSocket::bind(self.addr)?;
+                    log::info!("Listening on: {}", self);
+                    self.udp_socket = Some(socket);
+                }
+                if let Some(udp_socket) = self.udp_socket.as_mut() {
+                    return read_message_udp(udp_socket);
+                }
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "Failed to read message from network endpoint",
+        ))
+    }
 }
