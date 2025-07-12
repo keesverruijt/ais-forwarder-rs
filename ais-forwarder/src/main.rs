@@ -3,7 +3,7 @@ use config::Config;
 use env_logger::Env;
 use nmea_parser::ParsedMessage;
 use std::collections::HashMap;
-use std::net::{TcpListener, UdpSocket};
+use std::net::UdpSocket;
 use std::ops::Add;
 use std::path::PathBuf;
 use std::process::exit;
@@ -15,8 +15,6 @@ use std::{io, path};
 use common::NetworkEndpoint;
 use common::Protocol;
 use common::buffer::BufReaderDirectWriter;
-use common::read_message_tcp;
-use common::read_message_udp;
 use common::send_message_tcp;
 use common::send_message_udp;
 
