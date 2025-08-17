@@ -23,6 +23,8 @@ struct Location {
     location: HashMap<String, NetworkEndpoint>,
     persistence: Persistence,
     mmsi: u32,
+    prev_latitude: Option<f64>,
+    prev_longitude: Option<f64>,
 }
 
 impl Location {
@@ -35,6 +37,8 @@ impl Location {
             location,
             persistence,
             mmsi,
+            prev_latitude: None,
+            prev_longitude: None,
         }
     }
 
@@ -115,6 +119,39 @@ impl Location {
         Ok(())
     }
 
+    fn validate_position(&mut self, latitude: Option<f64>, longitude: Option<f64>) -> bool {
+        if latitude.is_none() || longitude.is_none() {
+            log::warn!("Invalid position: latitude or longitude is None");
+            return false;
+        }
+        let latitude = latitude.unwrap();
+        let longitude = longitude.unwrap();
+        let latitude_abs = latitude.abs();
+        let longitude_abs = longitude.abs();
+        if latitude_abs > 90.0 || longitude_abs > 180.0 {
+            log::warn!("Invalid position: latitude or longitude out of range");
+            return false;
+        }
+        if latitude_abs < 0.01 || longitude_abs < 0.01 {
+            log::warn!("Invalid position: latitude and longitude are too close to zero");
+            return false;
+        }
+        if let Some(prev_latitude) = self.prev_latitude {
+            if (latitude - prev_latitude).abs() >= 2.00 {
+                log::warn!("Invalid position: sudden latitude change detected");
+                return false;
+            }
+        }
+        if let Some(prev_longitude) = self.prev_longitude {
+            if (longitude - prev_longitude).abs() >= 2.00 {
+                log::warn!("Invalid position: sudden longitude change detected");
+                return false;
+            }
+        }
+
+        true
+    }
+
     fn parse_message(&mut self, message: &ParsedMessage, connection_ok: bool) -> io::Result<()> {
         let now = chrono::Utc::now();
         const TIME_FORMAT: &str = "%H%M%S";
@@ -122,6 +159,11 @@ impl Location {
 
         let nmea_message = match message {
             ParsedMessage::VesselDynamicData(message) => {
+                if !self.validate_position(message.latitude, message.longitude) {
+                    return Ok(());
+                }
+                self.prev_latitude = message.latitude;
+                self.prev_longitude = message.longitude;
                 format!(
                     "{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",
                     message.mmsi,
@@ -134,6 +176,11 @@ impl Location {
                 )
             }
             ParsedMessage::Rmc(message) => {
+                if !self.validate_position(message.latitude, message.longitude) {
+                    return Ok(());
+                }
+                self.prev_latitude = message.latitude;
+                self.prev_longitude = message.longitude;
                 let ts = message.timestamp.unwrap_or(now);
                 format!(
                     "{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",

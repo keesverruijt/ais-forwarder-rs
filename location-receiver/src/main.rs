@@ -16,7 +16,7 @@ fn main() {
     let db_path = Path::new("/var/db");
     std::fs::create_dir_all(&db_path).expect("Cannot create /var/db directory");
 
-    let listener = TcpListener::bind("0.0.0.0:11328").expect("Cannot bind to port 11328");
+    let listener = TcpListener::bind("10.67.0.1:11328").expect("Cannot bind to port 11328");
 
     loop {
         let (stream, addr) = listener.accept().expect("Failed to accept connection");
