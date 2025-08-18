@@ -25,6 +25,8 @@ struct Location {
     mmsi: u32,
     prev_latitude: Option<f64>,
     prev_longitude: Option<f64>,
+    doubtful_latitude: Option<f64>,
+    doubtful_longitude: Option<f64>,
 }
 
 impl Location {
@@ -39,6 +41,8 @@ impl Location {
             mmsi,
             prev_latitude: None,
             prev_longitude: None,
+            doubtful_latitude: None,
+            doubtful_longitude: None,
         }
     }
 
@@ -138,14 +142,28 @@ impl Location {
         }
         if let Some(prev_latitude) = self.prev_latitude {
             if (latitude - prev_latitude).abs() >= 2.00 {
-                log::warn!("Invalid position: sudden latitude change detected");
-                return false;
+                if let Some(doubtful_latitude) = self.doubtful_latitude {
+                    if (latitude - doubtful_latitude).abs() >= 2.00 {
+                        log::warn!("Doubtful position: latitude change is too big");
+                        return false;
+                    }
+                } else {
+                    log::warn!("Invalid position: latitude change is too big");
+                    return false;
+                }
             }
         }
         if let Some(prev_longitude) = self.prev_longitude {
             if (longitude - prev_longitude).abs() >= 2.00 {
-                log::warn!("Invalid position: sudden longitude change detected");
-                return false;
+                if let Some(doubtful_longitude) = self.doubtful_longitude {
+                    if (longitude - doubtful_longitude).abs() >= 2.00 {
+                        log::warn!("Doubtful position: longitude change is too big");
+                        return false;
+                    }
+                } else {
+                    log::warn!("Invalid position: longitude change is too big");
+                    return false;
+                }
             }
         }
 
@@ -160,10 +178,16 @@ impl Location {
         let nmea_message = match message {
             ParsedMessage::VesselDynamicData(message) => {
                 if !self.validate_position(message.latitude, message.longitude) {
+                    // If the same "weird" position is received a second time, we assume this
+                    // is the new ships position.
+                    self.doubtful_latitude = message.latitude;
+                    self.doubtful_longitude = message.longitude;
                     return Ok(());
                 }
                 self.prev_latitude = message.latitude;
                 self.prev_longitude = message.longitude;
+                self.doubtful_latitude = None;
+                self.doubtful_longitude = None;
                 format!(
                     "{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",
                     message.mmsi,
@@ -177,10 +201,16 @@ impl Location {
             }
             ParsedMessage::Rmc(message) => {
                 if !self.validate_position(message.latitude, message.longitude) {
+                    // If the same "weird" position is received a second time, we assume this
+                    // is the new ships position.
+                    self.doubtful_latitude = message.latitude;
+                    self.doubtful_longitude = message.longitude;
                     return Ok(());
                 }
                 self.prev_latitude = message.latitude;
                 self.prev_longitude = message.longitude;
+                self.doubtful_latitude = None;
+                self.doubtful_longitude = None;
                 let ts = message.timestamp.unwrap_or(now);
                 format!(
                     "{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",
