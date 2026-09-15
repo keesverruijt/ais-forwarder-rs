@@ -30,6 +30,21 @@ provider = serial:///dev/ttyUSB0:38400
 
 See `config.ini.demo` for all the forms.
 
+## Raw output
+
+The `[ais]` services get position and static reports only, downsampled per
+MMSI. A `[raw]` section adds outputs that receive every input line unmodified
+and unthrottled, including binary (type 6/8) messages, base stations and aids
+to navigation, for local tools such as a logger:
+
+```
+[raw]
+logger = udp://127.0.0.1:10110
+```
+
+A failing raw output is logged once and retried every 10 seconds; it never
+interrupts the forwarding to the `[ais]` services.
+
 ## Built-in web UI
 
 With a `[web]` section configured, ais-forwarder serves a small read-only web

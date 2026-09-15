@@ -45,6 +45,14 @@ provider = tcp://127.0.0.1:2599
 # MarineTraffic = udp://5.9.207.224:99999
 # VesselFinder = udp://ais.vesselfinder.com:9999
 
+[raw]
+# Optional. Outputs that receive every input line as-is: no filtering, no
+# per-MMSI downsampling, all message types (including binary messages 6 and 8,
+# base stations and aids to navigation). Meant for local tools such as a
+# logger. A failing raw output is skipped for 10 seconds at a time and never
+# interrupts the forwarding to the [ais] services.
+# logger = udp://127.0.0.1:10110
+
 [location]
 # Optional. Report our own location to a different service using RMC messages
 # optionally prepended by MMSI. Omit the whole section (or leave it empty) to

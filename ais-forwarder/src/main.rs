@@ -51,6 +51,8 @@ struct Dispatcher {
     own_ship_mmsi: u32,
     provider: NetworkEndpoint,
     ais: HashMap<String, NetworkEndpoint>,
+    raw: HashMap<String, NetworkEndpoint>,
+    raw_failing: HashMap<String, Instant>,
     location_tx: Option<Sender<LocationMessage>>,
     interval: u64,
     location_interval: u64,
@@ -248,19 +250,7 @@ fn main() {
     let location_tx: Option<Sender<LocationMessage>> = match settings.get("location") {
         Some(location) if !location.is_empty() => {
             let (tx, rx) = std::sync::mpsc::channel::<LocationMessage>();
-            let location: HashMap<String, NetworkEndpoint> = location
-                .into_iter()
-                .map(|(key, value)| {
-                    let address = value
-                        .parse::<NetworkEndpoint>()
-                        .map_err(|e| {
-                            log::error!("Invalid address '{}' in config.ini: {}", value, e);
-                            exit(1);
-                        })
-                        .unwrap();
-                    (key.clone(), address)
-                })
-                .collect();
+            let location = parse_endpoints(location);
             Builder::new()
                 .name("location".to_string())
                 .spawn(move || {
@@ -344,30 +334,21 @@ fn main() {
         };
 
         let ais = match settings.get("ais") {
-            Some(ais) => ais,
+            Some(ais) => parse_endpoints(ais),
             None => {
                 log::error!("Missing [ais] section in config.ini");
                 exit(1);
             }
         };
-        let ais = ais
-            .into_iter()
-            .map(|(key, value)| {
-                let address = value
-                    .parse::<NetworkEndpoint>()
-                    .map_err(|e| {
-                        log::error!("Invalid address '{}' in config.ini: {}", value, e);
-                        exit(1);
-                    })
-                    .unwrap();
-                (key.clone(), address)
-            })
-            .collect();
+        // [raw] is optional: outputs that get every input line unfiltered and
+        // unthrottled, e.g. for a local logger.
+        let raw = settings.get("raw").map(parse_endpoints).unwrap_or_default();
 
         let mut dispatcher = Dispatcher::new(
             own_ship_info,
             provider,
             ais,
+            raw,
             location_tx.clone(),
             interval,
             location_interval,
@@ -383,11 +364,71 @@ fn main() {
     }
 }
 
+/// Parse a config section of `name = protocol://address` entries.
+fn parse_endpoints(section: &HashMap<String, String>) -> HashMap<String, NetworkEndpoint> {
+    section
+        .iter()
+        .map(|(key, value)| {
+            let address = value
+                .parse::<NetworkEndpoint>()
+                .map_err(|e| {
+                    log::error!("Invalid address '{}' in config.ini: {}", value, e);
+                    exit(1);
+                })
+                .unwrap();
+            (key.clone(), address)
+        })
+        .collect()
+}
+
+/// How long a failing [raw] output is skipped before it is tried again.
+const RAW_RETRY: Duration = Duration::from_secs(10);
+
+/// Send one input line, unmodified, to every [raw] output. A raw output (e.g. a
+/// local logger) must never interrupt the forwarding to the [ais] services, so
+/// errors are only logged, once per outage, and a failing output is skipped
+/// for RAW_RETRY so a dead TCP peer cannot stall the input with timeouts.
+/// Returns the outputs the line was sent to, with the number of bytes sent.
+fn send_raw(
+    outputs: &mut HashMap<String, NetworkEndpoint>,
+    failing: &mut HashMap<String, Instant>,
+    line: &str,
+    now: Instant,
+) -> Vec<(String, usize)> {
+    let message = format!("{}\r\n", line);
+    let mut sent = Vec::new();
+    for (key, output) in outputs.iter_mut() {
+        if failing.get(key).is_some_and(|retry| now < *retry) {
+            continue;
+        }
+        match output.send_message(message.as_bytes(), key) {
+            Ok(()) => {
+                if failing.remove(key).is_some() {
+                    log::info!("{}: raw output resumed", key);
+                }
+                sent.push((key.clone(), message.len()));
+            }
+            Err(e) => {
+                if failing.insert(key.clone(), now + RAW_RETRY).is_none() {
+                    log::warn!(
+                        "{}: raw output failed, retrying every {}s: {}",
+                        key,
+                        RAW_RETRY.as_secs(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    sent
+}
+
 impl Dispatcher {
     fn new(
         own_ship_mmsi: u32,
         provider: NetworkEndpoint,
         ais: HashMap<String, NetworkEndpoint>,
+        raw: HashMap<String, NetworkEndpoint>,
         location_tx: Option<Sender<LocationMessage>>,
         interval: u64,
         location_interval: u64,
@@ -400,6 +441,8 @@ impl Dispatcher {
             own_ship_mmsi,
             provider,
             ais,
+            raw,
+            raw_failing: HashMap::new(),
             location_tx,
             interval,
             location_interval,
@@ -471,9 +514,10 @@ impl Dispatcher {
         let mut ais_counter: u64 = 0;
 
         log::info!(
-            "Starting dispatcher, provider {} with {} AIS endpoints",
+            "Starting dispatcher, provider {} with {} AIS endpoints and {} raw outputs",
             self.provider,
             self.ais.len(),
+            self.raw.len(),
         );
 
         loop {
@@ -537,6 +581,7 @@ impl Dispatcher {
 
             for line in message.lines() {
                 self.state.lock().unwrap().record_input_line(line);
+                self.broadcast_raw(line);
 
                 if let Some(wind) = parse_mwv_true(line, self.wind_source.as_deref()) {
                     self.latest_true_wind = Some(wind);
@@ -679,6 +724,18 @@ impl Dispatcher {
             self.state.lock().unwrap().record_output(key, msg.len());
         }
         Ok(())
+    }
+
+    /// Send an input line, unmodified, to the [raw] outputs.
+    fn broadcast_raw(&mut self, line: &str) {
+        if self.raw.is_empty() {
+            return;
+        }
+        let sent = send_raw(&mut self.raw, &mut self.raw_failing, line, Instant::now());
+        let mut state = self.state.lock().unwrap();
+        for (key, bytes) in sent {
+            state.record_output(&key, bytes);
+        }
     }
 
     fn log_ais_stats(&mut self) {
@@ -888,4 +945,61 @@ fn get_config_dir() -> PathBuf {
     };
     let path = path::Path::new(path);
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{TcpListener, UdpSocket};
+
+    fn outputs(address: String) -> HashMap<String, NetworkEndpoint> {
+        let mut outputs = HashMap::new();
+        outputs.insert("logger".to_string(), address.parse().unwrap());
+        outputs
+    }
+
+    #[test]
+    fn raw_output_receives_every_line_unmodified() {
+        let listener = UdpSocket::bind("127.0.0.1:0").unwrap();
+        listener
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut outputs = outputs(format!("udp://{}", listener.local_addr().unwrap()));
+        let mut failing = HashMap::new();
+        let line = "!AIVDM,1,1,,B,8h3Ovq1KmPA`08b8007P3ct5uAPmtlAkh000,0*2F";
+
+        let sent = send_raw(&mut outputs, &mut failing, line, Instant::now());
+
+        assert_eq!(sent, vec![("logger".to_string(), line.len() + 2)]);
+        let mut buffer = [0u8; 256];
+        let n = listener.recv(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], format!("{}\r\n", line).as_bytes());
+    }
+
+    #[test]
+    fn failing_raw_output_is_skipped_until_retry() {
+        // Bind and drop a listener to find a local port nobody listens on.
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut outputs = outputs(format!("tcp://127.0.0.1:{}", port));
+        let mut failing = HashMap::new();
+        let now = Instant::now();
+
+        assert!(send_raw(&mut outputs, &mut failing, "$GPRMC", now).is_empty());
+        let retry = failing["logger"];
+        assert_eq!(retry, now + RAW_RETRY);
+
+        // Within the retry period the output is not tried again.
+        let later = now + Duration::from_secs(1);
+        assert!(send_raw(&mut outputs, &mut failing, "$GPRMC", later).is_empty());
+        assert_eq!(failing["logger"], retry);
+
+        // After it, the output is tried again and stays marked as failing.
+        let after = now + RAW_RETRY;
+        assert!(send_raw(&mut outputs, &mut failing, "$GPRMC", after).is_empty());
+        assert_eq!(failing["logger"], after + RAW_RETRY);
+    }
 }
