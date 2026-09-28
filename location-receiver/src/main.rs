@@ -4,7 +4,7 @@ use std::io::{BufRead, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use common::buffer::BufReaderDirectWriter;
 
@@ -21,6 +21,18 @@ fn main() {
     loop {
         let (stream, addr) = listener.accept().expect("Failed to accept connection");
         log::info!("Accepted connection from: {}", addr);
+
+        // The boat's uplink changes (e.g. Starlink coming on) drop the old flow
+        // without a FIN or RST, so without keepalive the blocking read below
+        // waits forever and every reconnect leaks a thread and a socket.
+        let sock_ref = socket2::SockRef::from(&stream);
+        let ka = socket2::TcpKeepalive::new()
+            .with_time(Duration::from_secs(60))
+            .with_interval(Duration::from_secs(30));
+        if let Err(e) = sock_ref.set_tcp_keepalive(&ka) {
+            log::warn!("Cannot enable keepalive for {}: {}", addr, e);
+        }
+
         thread::spawn(move || {
             let mut message = String::new();
             let mut reader = BufReaderDirectWriter::new(stream);
@@ -55,6 +67,7 @@ fn main() {
                 }
                 message.clear();
             }
+            log::info!("Connection from {} closed", addr);
         });
     }
 }

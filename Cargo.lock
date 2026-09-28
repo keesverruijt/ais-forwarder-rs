@@ -730,6 +730,7 @@ dependencies = [
  "common",
  "env_logger",
  "log",
+ "socket2 0.5.10",
  "time",
 ]
 
