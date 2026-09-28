@@ -10,7 +10,7 @@ import math
 import sys
 import re
 import xml.etree.ElementTree as ET
-from datetime import datetime, date, timezone
+from datetime import datetime, date, time, timedelta, timezone
 
 NS = "http://www.topografix.com/GPX/1/1"
 NS_EXT = "http://merrimac.nl/gpx/ext/1"
@@ -140,6 +140,26 @@ def fix_stale_dates(trackpoints):
                 )
 
 
+def fix_midnight_dates(trackpoints):
+    """Fix midnight fixes stamped with the previous day's date.
+
+    The GPS sometimes sends its 00:00:00 fix with the previous day's date, so
+    it lands up to 24 hours before the fix it follows. Move such a fix (in the
+    first minute after midnight, earlier than its predecessor but with the same
+    date) forward one day, unless that would put it after the next fix.
+    """
+    for i in range(1, len(trackpoints)):
+        tp, prev = trackpoints[i], trackpoints[i - 1]
+        t = tp["time"]
+        if t.time() >= time(0, 1) or t >= prev["time"] or t.date() != prev["time"].date():
+            continue
+        moved = t + timedelta(days=1)
+        if i + 1 < len(trackpoints) and moved > trackpoints[i + 1]["time"]:
+            continue
+        print(f"Fixing midnight date {t:%Y-%m-%d %H:%M:%S} -> {moved:%Y-%m-%d}", file=sys.stderr)
+        tp["time"] = moved
+
+
 def _distance_nm(a, b):
     """Great-circle distance between two trackpoints in nautical miles."""
     phi1, phi2 = math.radians(a["lat"]), math.radians(b["lat"])
@@ -212,6 +232,7 @@ def convert(input_path, output_path):
     # Fix stale GPS dates: when the date jumps backward, use the next
     # forward date for the backward group (GPS restarts with old date).
     fix_stale_dates(trackpoints)
+    fix_midnight_dates(trackpoints)
     drop_sog_spikes(trackpoints)
 
     # Build GPX
