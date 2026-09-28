@@ -6,6 +6,7 @@ Replaces gpsbabel for the ais-forwarder pipeline.
 Usage: rmc2gpx.py input.rmc output.gpx
 """
 
+import math
 import sys
 import re
 import xml.etree.ElementTree as ET
@@ -139,6 +140,46 @@ def fix_stale_dates(trackpoints):
                 )
 
 
+def _distance_nm(a, b):
+    """Great-circle distance between two trackpoints in nautical miles."""
+    phi1, phi2 = math.radians(a["lat"]), math.radians(b["lat"])
+    dphi = phi2 - phi1
+    dlambda = math.radians(b["lon"] - a["lon"])
+    h = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return 2 * 3440.065 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def drop_sog_spikes(trackpoints, factor=3.0, margin=5.0):
+    """Drop single-sample SOG spikes (e.g. 42.8 kn between two 6 kn fixes).
+
+    A record's SOG is compared against a reference: the larger of the
+    neighbouring SOGs and the speed implied by the neighbouring positions
+    (prev -> next, skipping this record, so a glitched position cannot
+    inflate it). The SOG is dropped when it exceeds factor * reference and
+    is more than margin knots above it. Positions are kept.
+    """
+    for i in range(1, len(trackpoints) - 1):
+        tp = trackpoints[i]
+        sog = tp.get("sog")
+        if sog is None:
+            continue
+        prev, nxt = trackpoints[i - 1], trackpoints[i + 1]
+        ref = [s for s in (prev.get("sog"), nxt.get("sog")) if s is not None]
+        seconds = (nxt["time"] - prev["time"]).total_seconds()
+        if seconds > 0:
+            ref.append(_distance_nm(prev, nxt) / (seconds / 3600))
+        if not ref:
+            continue
+        reference = max(ref)
+        if sog > factor * reference and sog - reference > margin:
+            print(
+                f"Dropping SOG spike {sog:.1f} kn at {tp['time']:%Y-%m-%d %H:%M:%S} "
+                f"(reference {reference:.1f} kn)",
+                file=sys.stderr,
+            )
+            tp["sog"] = None
+
+
 def convert(input_path, output_path):
     ET.register_namespace("", NS)
     ET.register_namespace("ext", NS_EXT)
@@ -171,6 +212,7 @@ def convert(input_path, output_path):
     # Fix stale GPS dates: when the date jumps backward, use the next
     # forward date for the backward group (GPS restarts with old date).
     fix_stale_dates(trackpoints)
+    drop_sog_spikes(trackpoints)
 
     # Build GPX
     gpx = ET.Element(
