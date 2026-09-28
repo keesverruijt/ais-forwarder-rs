@@ -286,7 +286,10 @@ impl AisState {
 
     pub fn stats_json(&mut self) -> serde_json::Value {
         let now = SystemTime::now();
-        let uptime = now.duration_since(self.started).unwrap_or_default().as_secs();
+        let uptime = now
+            .duration_since(self.started)
+            .unwrap_or_default()
+            .as_secs();
         // Bytes/second over the trailing 60-second window.
         let now_s = now_sec();
         let in_bw = self.stats.in_roll.per_sec(now_s);
@@ -332,7 +335,6 @@ impl AisState {
             "vessels_tracked": self.vessels.len(),
         })
     }
-
 }
 
 #[derive(Serialize)]
