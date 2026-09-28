@@ -172,20 +172,19 @@ impl Location {
                 )
             }
             ParsedMessage::Rmc(message) => {
-                let ts = if let Some(ts) = message.timestamp {
-                    let date_diff = (now.date_naive() - ts.date_naive()).num_days().abs();
-                    if date_diff > 1 {
-                        // GPS date is stale/wrong, keep the RMC time but use today's date
-                        log::warn!(
-                            "RMC date off by {} days, using current date with RMC time",
-                            date_diff
-                        );
-                        now.date_naive().and_time(ts.time()).and_utc()
-                    } else {
-                        ts
+                let ts = match message.timestamp {
+                    Some(ts) => {
+                        let fixed = fix_rmc_date(ts, now);
+                        if fixed != ts {
+                            log::warn!(
+                                "RMC date {} is stale, using {} with RMC time",
+                                ts.date_naive(),
+                                fixed.date_naive()
+                            );
+                        }
+                        fixed
                     }
-                } else {
-                    now
+                    None => now,
                 };
                 format!(
                     "{:08x}@{}$GNRMC,{},A,{},{},{},{},{},,,A\r\n",
@@ -252,5 +251,69 @@ impl Location {
             }
             None => ",".to_string(),
         }
+    }
+}
+
+/// Returns the RMC timestamp with its date replaced by whichever of yesterday,
+/// today or tomorrow (relative to `now`) puts it closest to `now`, keeping the
+/// RMC time of day.
+///
+/// GPS units sometimes carry a stale date: days or years off after a restart,
+/// or, just after midnight, the previous day's date with a 00:00:00 time. The
+/// latter is only one day off, and would otherwise show up as a fix 24 hours
+/// in the past. Picking the nearest candidate still keeps a legitimate
+/// 23:59:59 fix from yesterday that arrives just after midnight.
+fn fix_rmc_date(ts: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+    let today = now.date_naive();
+    [today.pred_opt(), Some(today), today.succ_opt()]
+        .into_iter()
+        .flatten()
+        .map(|date| date.and_time(ts.time()).and_utc())
+        .min_by_key(|candidate| (*candidate - now).abs())
+        .unwrap_or(ts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fix_rmc_date;
+    use chrono::{DateTime, Utc};
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn keeps_correct_timestamp() {
+        let now = utc("2026-06-20T12:00:01Z");
+        let ts = utc("2026-06-20T12:00:00Z");
+        assert_eq!(fix_rmc_date(ts, now), ts);
+    }
+
+    #[test]
+    fn fixes_midnight_with_previous_date() {
+        let now = utc("2026-06-21T00:00:01Z");
+        let ts = utc("2026-06-20T00:00:00Z");
+        assert_eq!(fix_rmc_date(ts, now), utc("2026-06-21T00:00:00Z"));
+    }
+
+    #[test]
+    fn keeps_late_fix_from_yesterday() {
+        let now = utc("2026-06-21T00:00:01Z");
+        let ts = utc("2026-06-20T23:59:59Z");
+        assert_eq!(fix_rmc_date(ts, now), ts);
+    }
+
+    #[test]
+    fn keeps_early_fix_when_clock_lags() {
+        let now = utc("2026-06-20T23:59:59Z");
+        let ts = utc("2026-06-21T00:00:00Z");
+        assert_eq!(fix_rmc_date(ts, now), ts);
+    }
+
+    #[test]
+    fn fixes_date_years_off() {
+        let now = utc("2026-06-21T08:30:02Z");
+        let ts = utc("2006-11-05T08:30:00Z");
+        assert_eq!(fix_rmc_date(ts, now), utc("2026-06-21T08:30:00Z"));
     }
 }
