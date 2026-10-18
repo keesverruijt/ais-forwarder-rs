@@ -72,10 +72,7 @@ impl Location {
                     std::sync::mpsc::RecvTimeoutError::Timeout => {}
                     std::sync::mpsc::RecvTimeoutError::Disconnected => {
                         log::error!("Receiver disconnected");
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            "Receiver disconnected",
-                        ));
+                        return Err(io::Error::other("Receiver disconnected"));
                     }
                 },
             };
@@ -102,8 +99,8 @@ impl Location {
                 Ok((key, value)) => {
                     let key = &key.to_vec();
                     let value = &value.to_vec();
-                    let skey = String::from_utf8_lossy(&key);
-                    let svalue = String::from_utf8_lossy(&value);
+                    let skey = String::from_utf8_lossy(key);
+                    let svalue = String::from_utf8_lossy(value);
 
                     if *key == Persistence::NEXT_KEY_VALUE {
                         continue;
@@ -117,7 +114,7 @@ impl Location {
                             &svalue[0..svalue.len() - 2]
                         );
                         for (location, address) in self.location.iter_mut() {
-                            match address.send_message(value, &location) {
+                            match address.send_message(value, location) {
                                 Ok(()) => match address.read_to_string() {
                                     Ok(reply) => {
                                         log::debug!(
@@ -217,7 +214,7 @@ impl Location {
         }
 
         let nmea_bytes = nmea_message.as_bytes();
-        for (location, _) in self.location.iter_mut() {
+        for location in self.location.keys() {
             let db_key = format!("{}@{:08x}", location, unique);
             self.persistence.store(db_key.as_bytes(), nmea_bytes);
             self.persistence.flush();

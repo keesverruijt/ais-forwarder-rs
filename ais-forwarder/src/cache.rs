@@ -23,11 +23,11 @@ impl Persistence {
             .cache_capacity(5_000)
             .path(&database_path)
             .open()
-            .expect(format!("Cannot open database {}", database_path.display()).as_str());
+            .unwrap_or_else(|_| panic!("Cannot open database {}", database_path.display()));
 
-        let next_key = db.get(&Self::NEXT_KEY_VALUE).unwrap();
+        let next_key = db.get(Self::NEXT_KEY_VALUE).unwrap();
         if next_key.is_none() {
-            db.insert(&Self::NEXT_KEY_VALUE, &Self::INITIAL_KEY_VALUE)
+            db.insert(Self::NEXT_KEY_VALUE, &Self::INITIAL_KEY_VALUE)
                 .unwrap();
         }
         let count = db.len() - 1;
@@ -81,7 +81,7 @@ impl Persistence {
     pub fn next_key(&mut self) -> u64 {
         match self
             .db
-            .update_and_fetch(&Self::NEXT_KEY_VALUE, increment)
+            .update_and_fetch(Self::NEXT_KEY_VALUE, increment)
             .unwrap()
         {
             Some(n) => iv_to_u64(n).unwrap(),

@@ -14,7 +14,7 @@ fn main() {
     log::info!("location-receiver starting up");
 
     let db_path = Path::new("/var/db");
-    std::fs::create_dir_all(&db_path).expect("Cannot create /var/db directory");
+    std::fs::create_dir_all(db_path).expect("Cannot create /var/db directory");
 
     let listener = TcpListener::bind("10.67.0.1:11328").expect("Cannot bind to port 11328");
 
@@ -44,7 +44,7 @@ fn main() {
                         log::info!("Received message: {}", message);
                         // Process the message here
 
-                        if process_message(&message, &db_path).is_err() {
+                        if process_message(&message, db_path).is_err() {
                             break;
                         }
                     }
@@ -93,19 +93,16 @@ fn process_message(message: &str, db_path: &Path) -> std::io::Result<()> {
 
     // Prevent duplicate entries. This means reading through a ~200k file every
     // ten minutes or so, which doesn't seem like it needs optimizing.
-    match std::fs::OpenOptions::new().read(true).open(&path) {
-        Ok(file) => {
-            let file = BufReaderDirectWriter::new(file);
-            for line in file.lines() {
-                if let Ok(line) = line
-                    && line == message
-                {
-                    log::debug!("Duplicate entry received: {}", message);
-                    return Ok(());
-                }
+    if let Ok(file) = std::fs::OpenOptions::new().read(true).open(&path) {
+        let file = BufReaderDirectWriter::new(file);
+        for line in file.lines() {
+            if let Ok(line) = line
+                && line == message
+            {
+                log::debug!("Duplicate entry received: {}", message);
+                return Ok(());
             }
         }
-        Err(_) => {}
     };
 
     let mut file = std::fs::OpenOptions::new()
@@ -117,5 +114,5 @@ fn process_message(message: &str, db_path: &Path) -> std::io::Result<()> {
         log::error!("Error writing to {}: {}", path.display(), e);
         return Err(e);
     }
-    return Ok(());
+    Ok(())
 }
