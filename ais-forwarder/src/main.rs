@@ -630,7 +630,10 @@ impl Dispatcher {
 
                             if self.check_last_sent(&parsed_message) {
                                 ais_counter += 1;
-                                self.broadcast_ais(&parsed_message, fragments.join("").as_bytes())?;
+                                self.broadcast_ais(
+                                    &parsed_message,
+                                    fragments.join("\r\n").as_bytes(),
+                                )?;
                             } else if matches!(
                                 parsed_message,
                                 ParsedMessage::VesselDynamicData(_)
@@ -716,10 +719,9 @@ impl Dispatcher {
     }
 
     fn broadcast_ais_bytes(&mut self, nmea_message: &[u8]) -> io::Result<()> {
-        let msg = Self::rewrite_aivdo(nmea_message);
-        let msg = msg.as_ref().map_or(nmea_message, |v| v.as_slice());
+        let msg = Self::ais_datagram(nmea_message);
         for (key, address) in self.ais.iter_mut() {
-            address.send_message(msg, key)?;
+            address.send_message(&msg, key)?;
             *self.ais_msg_count.entry(key.clone()).or_insert(0) += 1;
             self.state.lock().unwrap().record_output(key, msg.len());
         }
@@ -743,6 +745,18 @@ impl Dispatcher {
             log::info!("AIS stats: {} messages sent to {}", count, dest);
         }
         self.next_ais_stats_ts = SystemTime::now() + Duration::from_secs(3600);
+    }
+
+    /// The bytes sent to the [ais] outputs for one message (one or more sentences, separated by
+    /// line breaks): !AIVDO rewritten to !AIVDM, and every sentence ended with CR LF, as NMEA
+    /// 0183 requires. Without it, receivers see the parts of a multi-part message as one
+    /// corrupt sentence, and sentences run together on a TCP output.
+    fn ais_datagram(nmea_message: &[u8]) -> Vec<u8> {
+        let mut msg = Self::rewrite_aivdo(nmea_message).unwrap_or_else(|| nmea_message.to_vec());
+        if !msg.ends_with(b"\n") {
+            msg.extend_from_slice(b"\r\n");
+        }
+        msg
     }
 
     /// Rewrite !AIVDO sentences to !AIVDM, recalculating checksums.
@@ -956,6 +970,45 @@ mod tests {
         let mut outputs = HashMap::new();
         outputs.insert("logger".to_string(), address.parse().unwrap());
         outputs
+    }
+
+    #[test]
+    fn ais_datagram_ends_every_sentence_with_crlf() {
+        let part1 =
+            "!AIVDM,2,1,2,A,53`qklH2Eaei0?O?GF1LThhDn0@F1Hh4lTpLR20t1po894@P06CS51Dg?OSS,0*51";
+        let part2 = "!AIVDM,2,2,2,A,20D`8888880,2*00";
+        let joined = [part1, part2].join("\r\n");
+        assert_eq!(
+            Dispatcher::ais_datagram(joined.as_bytes()),
+            format!("{part1}\r\n{part2}\r\n").into_bytes()
+        );
+        assert_eq!(
+            Dispatcher::ais_datagram(part2.as_bytes()),
+            format!("{part2}\r\n").into_bytes()
+        );
+        // Already terminated: not doubled
+        let done = format!("{part2}\r\n");
+        assert_eq!(Dispatcher::ais_datagram(done.as_bytes()), done.into_bytes());
+    }
+
+    #[test]
+    fn ais_datagram_rewrites_aivdo_and_keeps_crlf_per_sentence() {
+        let msg24 = Message24::new(true, 244000000, "TEST", 37, "PA1234", 5, 5, 2, 2);
+        let joined = msg24.to_nmea().join("\r\n");
+        let out = String::from_utf8(Dispatcher::ais_datagram(joined.as_bytes())).unwrap();
+        let lines: Vec<&str> = out.split_inclusive('\n').collect();
+        assert_eq!(lines.len(), 2, "{out:?}");
+        for line in lines {
+            assert!(line.starts_with("!AIVDM,"), "{line:?}");
+            assert!(line.ends_with("\r\n"), "{line:?}");
+            let line = line.trim_end();
+            let star = line.rfind('*').unwrap();
+            assert_eq!(
+                format!("{:02X}", calculate_checksum(&line[1..star])),
+                &line[star + 1..],
+                "{line:?}"
+            );
+        }
     }
 
     #[test]
