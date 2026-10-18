@@ -182,7 +182,7 @@ impl NetworkEndpoint {
     pub fn read_to_string(&mut self) -> io::Result<String> {
         match self.protocol {
             Protocol::TCP => {
-                if self.tcp_stream.len() == 0 {
+                if self.tcp_stream.is_empty() {
                     let stream = std::net::TcpStream::connect(self.addr).map_err(|e| {
                         std::io::Error::new(
                             std::io::ErrorKind::ConnectionRefused,
@@ -196,7 +196,7 @@ impl NetworkEndpoint {
                 }
                 match read_message_tcp(&mut self.tcp_stream[0]) {
                     Ok(message) => {
-                        if message.len() > 0 {
+                        if !message.is_empty() {
                             return Ok(message);
                         }
                         self.tcp_stream.clear();
@@ -258,7 +258,7 @@ impl NetworkEndpoint {
                 while i < self.tcp_stream.len() {
                     match read_message_tcp(&mut self.tcp_stream[i]) {
                         Ok(message) => {
-                            if message.len() > 0 {
+                            if !message.is_empty() {
                                 return Ok(message);
                             }
                             // Drop stream on empty read
@@ -326,17 +326,13 @@ impl NetworkEndpoint {
                         Ok(_) => return Ok(buffer),
                         Err(e) => {
                             self.serial_reader = None;
-                            return Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("serial read {}: {}", self, e),
-                            ));
+                            return Err(io::Error::other(format!("serial read {}: {}", self, e)));
                         }
                     }
                 }
             }
         }
-        Err(io::Error::new(
-            io::ErrorKind::Other,
+        Err(io::Error::other(
             "Failed to read message from network endpoint",
         ))
     }
@@ -352,7 +348,7 @@ impl NetworkEndpoint {
                         true
                     }
                 });
-                self.tcp_stream.len() > 0
+                !self.tcp_stream.is_empty()
             }
             Protocol::UDP => self.udp_socket.is_some(),
             Protocol::UDPListen => true,
@@ -372,7 +368,7 @@ impl NetworkEndpoint {
                     }
                 });
 
-                if self.tcp_stream.len() == 0 {
+                if self.tcp_stream.is_empty() {
                     let stream =
                         std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(30))
                             .map_err(|e| {

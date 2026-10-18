@@ -1,5 +1,5 @@
 use std::{
-    cmp::{max, min},
+    cmp::min,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -21,10 +21,10 @@ pub fn parse_mwv_true(sentence: &str, talker: Option<&str>) -> Option<TrueWind> 
     if &sentence[3..6] != "MWV" {
         return None;
     }
-    if let Some(t) = talker {
-        if &sentence[1..3] != t {
-            return None;
-        }
+    if let Some(t) = talker
+        && &sentence[1..3] != t
+    {
+        return None;
     }
     let data = sentence.split('*').next()?;
     let fields: Vec<&str> = data.split(',').collect();
@@ -95,18 +95,12 @@ impl Message18 {
 
         binary_str += &format!("{:01b}", 0);
 
-        let mut longitude: f64 = match self.longitude {
-            Some(lon) => lon,
-            None => 181.0, // Not available
-        };
+        let mut longitude: f64 = self.longitude.unwrap_or(181.0);
         longitude *= 60.0 * 10_000.0; // Longitude in 1/10_000 minutes
         let longitude = longitude as i64 as u32 & 0x0FFFFFFF;
         binary_str += &format!("{:028b}", longitude);
 
-        let mut latitude: f64 = match self.latitude {
-            Some(lat) => lat,
-            None => 91.0, // Not available
-        };
+        let mut latitude: f64 = self.latitude.unwrap_or(91.0);
         latitude *= 60.0 * 10_000.0; // Latitude in 1/10_000 minutes
         let latitude = latitude as i64 as u32 & 0x07FFFFFF;
         binary_str += &format!("{:027b}", latitude);
@@ -114,14 +108,14 @@ impl Message18 {
         binary_str += &format!(
             "{:012b}",
             match self.course_over_ground {
-                Some(cog) => max(min((cog * 10.0) as u16, 3599), 0),
+                Some(cog) => min((cog * 10.0) as u16, 3599),
                 None => 3600, // Not available
             }
         );
         binary_str += &format!(
             "{:09b}",
             match self.true_heading {
-                Some(th) => max(min(th, 359), 0),
+                Some(th) => min(th, 359),
                 None => 511, // Not available
             }
         );
@@ -163,6 +157,7 @@ pub struct Message24 {
 }
 
 impl Message24 {
+    #[allow(clippy::too_many_arguments)] // one per AIS type 24 field
     pub fn new(
         own_ship: bool,
         mmsi: u32,
@@ -218,8 +213,8 @@ impl Message24 {
         bits += &format!("{:04b}", 0); // Unit model code
         bits += &format!("{:020b}", 0); // Serial number
         bits += &string_to_ais6_bits(&self.callsign, 7); // Callsign (42 bits)
-        bits += &format!("{:09b}", min(self.bow as u16, 511));
-        bits += &format!("{:09b}", min(self.stern as u16, 511));
+        bits += &format!("{:09b}", min(self.bow, 511));
+        bits += &format!("{:09b}", min(self.stern, 511));
         bits += &format!("{:06b}", min(self.port, 63));
         bits += &format!("{:06b}", min(self.starboard, 63));
         bits += &format!("{:04b}", 1); // Position fix type = GPS
@@ -235,9 +230,9 @@ impl Message24 {
 /// Convert a character to AIS 6-bit encoding (ITU-R M.1371-5).
 fn char_to_ais6(c: char) -> u8 {
     let c = c.to_ascii_uppercase() as u8;
-    if c >= 64 && c <= 95 {
+    if (64..=95).contains(&c) {
         c - 64 // '@'=0, 'A'=1, ..., 'Z'=26, ...
-    } else if c >= 32 && c <= 63 {
+    } else if (32..=63).contains(&c) {
         c // ' '=32, '!'=33, ..., '?'=63
     } else {
         0 // '@' for unknown

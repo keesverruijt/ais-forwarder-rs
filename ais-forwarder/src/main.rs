@@ -26,8 +26,8 @@ mod web;
 
 #[derive(PartialEq)]
 enum RmcSource {
-    RMC,
-    AIS,
+    Rmc,
+    Ais,
     Both,
 }
 
@@ -159,8 +159,8 @@ fn main() {
             exit(1);
         }
         Some(s) => match s.to_ascii_lowercase().as_str() {
-            "rmc" => RmcSource::RMC,
-            "ais" => RmcSource::AIS,
+            "rmc" => RmcSource::Rmc,
+            "ais" => RmcSource::Ais,
             "both" => RmcSource::Both,
             _ => {
                 log::error!("Invalid rmc_source (should be AIS, RMC or Both) in config.ini");
@@ -424,6 +424,7 @@ fn send_raw(
 }
 
 impl Dispatcher {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         own_ship_mmsi: u32,
         provider: NetworkEndpoint,
@@ -607,7 +608,7 @@ impl Dispatcher {
                                 }
                                 (
                                     Some(
-                                        *rmc_source != RmcSource::RMC
+                                        *rmc_source != RmcSource::Rmc
                                             && last_seen_rmc_message + RMC_MESSAGE_TIMEOUT < now
                                             && (data.own_vessel || data.mmsi == self.own_ship_mmsi),
                                     ),
@@ -617,7 +618,7 @@ impl Dispatcher {
                             }
                             ParsedMessage::VesselStaticData(_data) => (Some(false), None, None),
                             ParsedMessage::Rmc(data) => {
-                                if *rmc_source != RmcSource::AIS {
+                                if *rmc_source != RmcSource::Ais {
                                     last_seen_rmc_message = now;
                                     (Some(true), data.latitude, data.longitude)
                                 } else {
@@ -841,7 +842,7 @@ impl Dispatcher {
             }
             _ => {}
         }
-        return false;
+        false
     }
 
     // Sanity-check an own-ship position before forwarding it. A rejected fix is
@@ -882,19 +883,11 @@ impl Dispatcher {
             );
             return false;
         }
-        if let Some(prev_latitude) = self.prev_latitude {
-            if (latitude - prev_latitude).abs() >= 2.00 {
-                if let Some(doubtful_latitude) = self.doubtful_latitude {
-                    if (latitude - doubtful_latitude).abs() >= 2.00 {
-                        log::debug!(
-                            "Skipping own position: latitude jump to {:.5} [{}]",
-                            latitude,
-                            raw
-                        );
-                        self.doubtful_latitude = Some(latitude);
-                        return false;
-                    }
-                } else {
+        if let Some(prev_latitude) = self.prev_latitude
+            && (latitude - prev_latitude).abs() >= 2.00
+        {
+            if let Some(doubtful_latitude) = self.doubtful_latitude {
+                if (latitude - doubtful_latitude).abs() >= 2.00 {
                     log::debug!(
                         "Skipping own position: latitude jump to {:.5} [{}]",
                         latitude,
@@ -903,21 +896,21 @@ impl Dispatcher {
                     self.doubtful_latitude = Some(latitude);
                     return false;
                 }
+            } else {
+                log::debug!(
+                    "Skipping own position: latitude jump to {:.5} [{}]",
+                    latitude,
+                    raw
+                );
+                self.doubtful_latitude = Some(latitude);
+                return false;
             }
         }
-        if let Some(prev_longitude) = self.prev_longitude {
-            if (longitude - prev_longitude).abs() >= 2.00 {
-                if let Some(doubtful_longitude) = self.doubtful_longitude {
-                    if (longitude - doubtful_longitude).abs() >= 2.00 {
-                        log::debug!(
-                            "Skipping own position: longitude jump to {:.5} [{}]",
-                            longitude,
-                            raw
-                        );
-                        self.doubtful_longitude = Some(longitude);
-                        return false;
-                    }
-                } else {
+        if let Some(prev_longitude) = self.prev_longitude
+            && (longitude - prev_longitude).abs() >= 2.00
+        {
+            if let Some(doubtful_longitude) = self.doubtful_longitude {
+                if (longitude - doubtful_longitude).abs() >= 2.00 {
                     log::debug!(
                         "Skipping own position: longitude jump to {:.5} [{}]",
                         longitude,
@@ -926,6 +919,14 @@ impl Dispatcher {
                     self.doubtful_longitude = Some(longitude);
                     return false;
                 }
+            } else {
+                log::debug!(
+                    "Skipping own position: longitude jump to {:.5} [{}]",
+                    longitude,
+                    raw
+                );
+                self.doubtful_longitude = Some(longitude);
+                return false;
             }
         }
 
